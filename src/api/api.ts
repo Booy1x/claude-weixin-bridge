@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadConfigRouteTag } from "../auth/accounts.js";
 import { logger } from "../util/logger.js";
 import { redactBody, redactUrl } from "../util/redact.js";
 
@@ -96,7 +95,7 @@ function buildCommonHeaders(): Record<string, string> {
     "iLink-App-Id": ILINK_APP_ID,
     "iLink-App-ClientVersion": String(ILINK_APP_CLIENT_VERSION),
   };
-  const routeTag = loadConfigRouteTag();
+  const routeTag = process.env.WEIXIN_SKROUTETAG?.trim();
   if (routeTag) {
     headers.SKRouteTag = routeTag;
   }

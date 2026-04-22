@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 
 /**
  * Plugin logger — writes JSON lines to the main openclaw log file:
@@ -10,7 +9,7 @@ import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtim
  * Same file and format used by all other channels.
  */
 
-const MAIN_LOG_DIR = resolvePreferredOpenClawTmpDir();
+const MAIN_LOG_DIR = process.env.CLAUDE_WEIXIN_LOG_DIR?.trim() || os.tmpdir();
 const SUBSYSTEM = "gateway/channels/openclaw-weixin";
 const RUNTIME = "node";
 const RUNTIME_VERSION = process.versions.node;
