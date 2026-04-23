@@ -49,9 +49,11 @@ function parseEnvList(name: string, fallback: string[]): string[] {
 
 type ParsedCommand =
   | { type: "sync"; all: boolean }
+  | { type: "projects" }
   | { type: "sessions" }
   | { type: "new"; project?: string; title: string }
-  | { type: "use"; target: string };
+  | { type: "use"; target: string }
+  | { type: "project"; target: string };
 
 function parseCommand(rawBody: string): ParsedCommand | null {
   const body = rawBody.trim();
@@ -63,6 +65,10 @@ function parseCommand(rawBody: string): ParsedCommand | null {
 
   if (head === "/sync") {
     return { type: "sync", all: rest.toLowerCase() === "all" };
+  }
+
+  if (head === "/projects") {
+    return { type: "projects" };
   }
 
   if (head === "/sessions") {
@@ -91,6 +97,11 @@ function parseCommand(rawBody: string): ParsedCommand | null {
   if (head === "/use") {
     if (!rest) return null;
     return { type: "use", target: rest };
+  }
+
+  if (head === "/project") {
+    if (!rest) return null;
+    return { type: "project", target: rest };
   }
 
   return null;
@@ -132,16 +143,26 @@ function touchSession(user: StandaloneUserRuntimeState, sessionId: string): void
   user.sessionOrder = nextOrder.slice(0, MAX_SESSION_LIST);
 }
 
+function syncFocusedProjectFromSession(user: StandaloneUserRuntimeState, session?: StandaloneSessionState): void {
+  if (session?.project) {
+    user.focusedProject = session.project;
+  }
+}
+
 function ensureFocusedSession(user: StandaloneUserRuntimeState): StandaloneSessionState {
   const focused = user.focusedSessionId ? user.sessions[user.focusedSessionId] : undefined;
-  if (focused) return focused;
+  if (focused) {
+    syncFocusedProjectFromSession(user, focused);
+    return focused;
+  }
 
   const now = new Date().toISOString();
   const sessionId = createLocalSessionId();
   const created: StandaloneSessionState = {
     id: sessionId,
     claudeSessionId: createClaudeSessionId(),
-    title: "inbox",
+    title: user.focusedProject ? `${user.focusedProject} inbox` : "inbox",
+    project: user.focusedProject,
     status: "active",
     createdAt: now,
     updatedAt: now,
@@ -151,17 +172,19 @@ function ensureFocusedSession(user: StandaloneUserRuntimeState): StandaloneSessi
   user.sessions[sessionId] = created;
   user.focusedSessionId = sessionId;
   touchSession(user, sessionId);
+  syncFocusedProjectFromSession(user, created);
   return created;
 }
 
 function createSession(user: StandaloneUserRuntimeState, params: { project?: string; title: string }): StandaloneSessionState {
   const now = new Date().toISOString();
   const sessionId = createLocalSessionId();
+  const project = params.project?.trim() || user.focusedProject;
   const created: StandaloneSessionState = {
     id: sessionId,
     claudeSessionId: createClaudeSessionId(),
     title: params.title,
-    project: params.project,
+    project,
     status: "active",
     createdAt: now,
     updatedAt: now,
@@ -171,6 +194,7 @@ function createSession(user: StandaloneUserRuntimeState, params: { project?: str
   user.sessions[sessionId] = created;
   user.focusedSessionId = sessionId;
   touchSession(user, sessionId);
+  syncFocusedProjectFromSession(user, created);
 
   const overflow = user.sessionOrder.slice(MAX_SESSION_LIST);
   for (const oldSessionId of overflow) {
@@ -205,6 +229,53 @@ function resolveSessionByTarget(user: StandaloneUserRuntimeState, targetRaw: str
   return null;
 }
 
+function listProjects(user: StandaloneUserRuntimeState): Array<{ name: string; sessions: StandaloneSessionState[] }> {
+  const map = new Map<string, StandaloneSessionState[]>();
+  for (const sessionId of user.sessionOrder) {
+    const session = user.sessions[sessionId];
+    if (!session) continue;
+    const project = session.project || "(未分组)";
+    const group = map.get(project) || [];
+    group.push(session);
+    map.set(project, group);
+  }
+  return Array.from(map.entries()).map(([name, sessions]) => ({ name, sessions }));
+}
+
+function resolveProjectName(user: StandaloneUserRuntimeState, targetRaw: string): string | null {
+  const target = targetRaw.trim();
+  if (!target) return null;
+  const groups = listProjects(user);
+  const direct = groups.find((group) => group.name === target);
+  if (direct) return direct.name;
+
+  const asIndex = Number(target);
+  if (Number.isInteger(asIndex) && asIndex > 0) {
+    const group = groups[asIndex - 1];
+    if (group) return group.name;
+  }
+
+  const lower = target.toLowerCase();
+  const fuzzy = groups.find((group) => group.name.toLowerCase().includes(lower));
+  return fuzzy?.name || null;
+}
+
+function switchFocusedProject(user: StandaloneUserRuntimeState, projectName: string): StandaloneSessionState | null {
+  user.focusedProject = projectName === "(未分组)" ? undefined : projectName;
+  for (const sessionId of user.sessionOrder) {
+    const session = user.sessions[sessionId];
+    if (!session) continue;
+    const sessionProject = session.project || "(未分组)";
+    if (sessionProject === projectName) {
+      user.focusedSessionId = session.id;
+      touchSession(user, session.id);
+      return session;
+    }
+  }
+  user.focusedSessionId = undefined;
+  return null;
+}
+
 function updateSessionFromTurn(session: StandaloneSessionState, userText: string, assistantText: string): void {
   session.turnCount += 1;
   session.initialized = true;
@@ -222,48 +293,73 @@ function formatSessionLine(index: number, session: StandaloneSessionState, focus
 function buildSyncCardForSession(session: StandaloneSessionState): string {
   return trimReplyText([
     "[SYNC]",
+    `项目: ${session.project || "(未设置)"}`,
     `状态: ${session.status === "active" ? "RUNNING" : "ARCHIVED"}`,
     `当前在做: ${truncateForCard(session.lastUserText || session.title, 100)}`,
     `做到哪: 已完成 ${session.turnCount} 轮`,
     `下一步: ${truncateForCard(session.lastAssistantText || "等待你的下一条消息", 100)}`,
-    "你可以回复: 任意事项继续处理，或 /sessions /use 切换会话",
+    "你可以直接回复继续当前任务，或 /projects 切项目",
   ].join("\n"));
 }
 
 function buildSyncAllCard(user: StandaloneUserRuntimeState): string {
   const lines: string[] = ["[SYNC ALL]"];
-  if (user.sessionOrder.length === 0) {
-    lines.push("暂无会话，先发普通消息或 /new 创建会话。");
-    return lines.join("\n");
+  const groups = listProjects(user);
+  if (groups.length === 0) {
+    lines.push("暂无任务，先发普通消息或 /new <项目> | <标题> 创建。 ");
+    return trimReplyText(lines.join("\n"));
   }
 
-  const top = user.sessionOrder.slice(0, 5);
-  lines.push(`会话数: ${user.sessionOrder.length}（展示最近 ${top.length} 条）`);
-  for (let i = 0; i < top.length; i += 1) {
-    const sessionId = top[i];
-    const session = user.sessions[sessionId];
-    if (!session) continue;
-    const focused = user.focusedSessionId === session.id ? "*" : " ";
-    lines.push(`${focused}${i + 1}. ${session.title} | ${session.id} | ${session.turnCount}轮`);
+  lines.push(`项目数: ${groups.length}`);
+  for (let i = 0; i < Math.min(groups.length, 5); i += 1) {
+    const group = groups[i];
+    const focused = (user.focusedProject || "(未分组)") === group.name ? "*" : " ";
+    const current = group.sessions[0];
+    lines.push(`${focused}${i + 1}. ${group.name} | ${group.sessions.length}个任务 | 当前: ${truncateForCard(current?.title, 32)}`);
   }
-  lines.push("用 /use <编号> 或 /use <sessionId> 切换焦点。");
+  lines.push("用 /project <编号> 切项目，直接回复继续当前任务。");
+  return trimReplyText(lines.join("\n"));
+}
+
+function buildProjectsCard(user: StandaloneUserRuntimeState): string {
+  const lines: string[] = ["[PROJECTS]"];
+  const groups = listProjects(user);
+  if (groups.length === 0) {
+    lines.push("暂无项目。可直接发消息开始，或 /new <项目> | <标题>。\n");
+    return trimReplyText(lines.join("\n"));
+  }
+
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i];
+    const focused = (user.focusedProject || "(未分组)") === group.name ? "*" : " ";
+    lines.push(`${focused}${i + 1}. ${group.name} (${group.sessions.length}个任务)`);
+  }
+  lines.push("* 表示当前项目；用 /project <编号> 切换。 ");
   return trimReplyText(lines.join("\n"));
 }
 
 function buildSessionsCard(user: StandaloneUserRuntimeState): string {
-  const lines: string[] = ["[SESSIONS]"];
-  if (user.sessionOrder.length === 0) {
-    lines.push("暂无会话。可发送普通消息自动创建，或 /new <标题>。\n");
-    return lines.join("\n");
+  const lines: string[] = ["[TASKS]"];
+  const focusedProject = user.focusedProject;
+  const ids = user.sessionOrder.filter((id) => {
+    const session = user.sessions[id];
+    if (!session) return false;
+    if (!focusedProject) return true;
+    return session.project === focusedProject;
+  }).slice(0, MAX_SESSION_LIST);
+
+  if (ids.length === 0) {
+    lines.push(`当前项目 ${focusedProject || "(未分组)"} 暂无任务。可直接发消息继续，或 /new <标题>。`);
+    return trimReplyText(lines.join("\n"));
   }
 
-  const ids = user.sessionOrder.slice(0, MAX_SESSION_LIST);
+  lines.push(`当前项目: ${focusedProject || "(未分组)"}`);
   for (let i = 0; i < ids.length; i += 1) {
     const session = user.sessions[ids[i]];
     if (!session) continue;
     lines.push(formatSessionLine(i + 1, session, user.focusedSessionId === session.id));
   }
-  lines.push("* 表示当前焦点会话");
+  lines.push("* 表示当前任务；直接回复会继续当前任务。 ");
   return trimReplyText(lines.join("\n"));
 }
 
@@ -388,7 +484,9 @@ async function cmdRun(): Promise<void> {
           let replyText = "";
 
           const command = parseCommand(body);
-          if (command?.type === "sessions") {
+          if (command?.type === "projects") {
+            replyText = buildProjectsCard(userRuntime);
+          } else if (command?.type === "sessions") {
             replyText = buildSessionsCard(userRuntime);
           } else if (command?.type === "new") {
             const created = createSession(userRuntime, {
@@ -396,22 +494,35 @@ async function cmdRun(): Promise<void> {
               title: command.title,
             });
             replyText = trimReplyText([
-              "已创建并切换到新会话。",
-              `会话: ${created.id}`,
-              `标题: ${created.title}`,
+              "已创建并切到当前任务。",
               `项目: ${created.project || "(未设置)"}`,
+              `任务: ${created.title}`,
+              `编号: ${created.id}`,
             ].join("\n"));
+          } else if (command?.type === "project") {
+            const projectName = resolveProjectName(userRuntime, command.target);
+            if (!projectName) {
+              replyText = `未找到项目: ${command.target}`;
+            } else {
+              const session = switchFocusedProject(userRuntime, projectName);
+              replyText = trimReplyText([
+                "已切换当前项目。",
+                `项目: ${projectName}`,
+                `当前任务: ${session?.title || "暂无，直接发消息会新建任务"}`,
+              ].join("\n"));
+            }
           } else if (command?.type === "use") {
             const target = resolveSessionByTarget(userRuntime, command.target);
             if (!target) {
-              replyText = `未找到会话: ${command.target}`;
+              replyText = `未找到任务: ${command.target}`;
             } else {
               userRuntime.focusedSessionId = target.id;
               touchSession(userRuntime, target.id);
+              syncFocusedProjectFromSession(userRuntime, target);
               replyText = trimReplyText([
-                "已切换焦点会话。",
-                `会话: ${target.id}`,
-                `标题: ${target.title}`,
+                "已切换当前任务。",
+                `项目: ${target.project || "(未设置)"}`,
+                `任务: ${target.title}`,
               ].join("\n"));
             }
           } else if (command?.type === "sync" && command.all) {
@@ -419,6 +530,7 @@ async function cmdRun(): Promise<void> {
           } else {
             const session = ensureFocusedSession(userRuntime);
             touchSession(userRuntime, session.id);
+            syncFocusedProjectFromSession(userRuntime, session);
 
             if (command?.type === "sync") {
               try {

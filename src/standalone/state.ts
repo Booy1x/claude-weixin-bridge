@@ -28,6 +28,7 @@ export type StandaloneSessionState = {
 };
 
 export type StandaloneUserRuntimeState = {
+  focusedProject?: string;
   focusedSessionId?: string;
   sessions: Record<string, StandaloneSessionState>;
   sessionOrder: string[];
@@ -119,8 +120,12 @@ function normalizeUserRuntimeState(raw: unknown): StandaloneUserRuntimeState {
   const focusedSessionId = typeof raw.focusedSessionId === "string" && sessions[raw.focusedSessionId]
     ? raw.focusedSessionId
     : undefined;
+  const focusedProject = typeof raw.focusedProject === "string" && raw.focusedProject.trim()
+    ? raw.focusedProject.trim()
+    : (focusedSessionId ? sessions[focusedSessionId]?.project : undefined);
 
   return {
+    focusedProject,
     focusedSessionId,
     sessions,
     sessionOrder,

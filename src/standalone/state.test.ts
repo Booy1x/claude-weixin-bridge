@@ -42,6 +42,7 @@ describe("standalone runtime state", () => {
       getUpdatesBuf: "cursor",
       users: {
         u1: {
+          focusedProject: "prj1",
           focusedSessionId: "s1",
           sessionOrder: ["s1"],
           sessions: {
@@ -49,6 +50,7 @@ describe("standalone runtime state", () => {
               id: "s1",
               claudeSessionId: "c1",
               title: "task",
+              project: "prj1",
               status: "active",
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z",
@@ -63,5 +65,36 @@ describe("standalone runtime state", () => {
     saveStandaloneRuntimeState(runtime);
     const loaded = loadStandaloneRuntimeState();
     expect(loaded).toEqual(runtime);
+  });
+
+  it("derives focused project from focused session for older runtime files", () => {
+    const dir = mkTmpStateDir();
+    process.env.CLAUDE_WEIXIN_STATE_DIR = dir;
+
+    fs.writeFileSync(path.join(dir, "runtime.json"), JSON.stringify({
+      version: 1,
+      users: {
+        u1: {
+          focusedSessionId: "s1",
+          sessionOrder: ["s1"],
+          sessions: {
+            s1: {
+              id: "s1",
+              claudeSessionId: "c1",
+              title: "task",
+              project: "prj1",
+              status: "active",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              turnCount: 1,
+              initialized: true,
+            },
+          },
+        },
+      },
+    }), "utf-8");
+
+    const loaded = loadStandaloneRuntimeState();
+    expect(loaded.users.u1.focusedProject).toBe("prj1");
   });
 });
