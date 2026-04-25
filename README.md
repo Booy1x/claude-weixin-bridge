@@ -254,33 +254,39 @@ All media types (image/voice/file/video) are transferred via CDN using AES-128-E
 
 > For complete type definitions, see [`src/api/types.ts`](src/api/types.ts). For API call implementations, see [`src/api/api.ts`](src/api/api.ts).
 
-## Uninstall
+## Cleanup
+
+Remove local runtime state:
 
 ```bash
-openclaw plugins uninstall @tencent-weixin/openclaw-weixin
+rm -rf ~/.claude-weixin
 ```
 
 ## Troubleshooting
 
-### "requires OpenClaw >=2026.3.22" error
+### `npm run standalone:login` fails
 
-Your OpenClaw version is too old for this plugin version. Check with:
+Check that your local Claude CLI is available:
 
 ```bash
-openclaw --version
+claude --version
 ```
 
-Install the legacy plugin line instead:
+If you use a custom Claude executable, set `CLAUDE_CMD` before running the login flow.
+
+### `npm run standalone:run` exits immediately
+
+Check that the login state exists under `~/.claude-weixin/` and try logging in again:
 
 ```bash
-openclaw plugins install @tencent-weixin/openclaw-weixin@legacy
+npm run standalone:login
 ```
 
-### Channel shows "OK" but doesn't connect
+### Need a clean local reset
 
-Ensure `plugins.entries.openclaw-weixin.enabled` is `true` in `~/.openclaw/openclaw.json`:
+Remove the local state directory and log in again:
 
 ```bash
-openclaw config set plugins.entries.openclaw-weixin.enabled true
-openclaw gateway restart
+rm -rf ~/.claude-weixin
+npm run standalone:login
 ```

@@ -254,33 +254,39 @@ npm run test:run
 
 > 完整的类型定义见 [`src/api/types.ts`](src/api/types.ts)，API 调用实现见 [`src/api/api.ts`](src/api/api.ts)。
 
-## 卸载
+## 清理
+
+删除本地运行时状态：
 
 ```bash
-openclaw plugins uninstall @tencent-weixin/openclaw-weixin
+rm -rf ~/.claude-weixin
 ```
 
 ## 故障排查
 
-### "requires OpenClaw >=2026.3.22" 报错
+### `npm run standalone:login` 失败
 
-你的 OpenClaw 版本太旧，不兼容当前插件版本。检查版本：
+先确认本地 Claude CLI 可用：
 
 ```bash
-openclaw --version
+claude --version
 ```
 
-安装旧版插件线：
+如果你使用的是自定义 Claude 可执行命令，请在运行登录流程前设置 `CLAUDE_CMD`。
+
+### `npm run standalone:run` 启动后立刻退出
+
+确认 `~/.claude-weixin/` 下已有登录状态；如果没有，请重新登录：
 
 ```bash
-openclaw plugins install @tencent-weixin/openclaw-weixin@legacy
+npm run standalone:login
 ```
 
-### Channel 显示 "OK" 但未连接
+### 需要彻底重置本地状态
 
-确保 `~/.openclaw/openclaw.json` 中 `plugins.entries.openclaw-weixin.enabled` 为 `true`：
+删除本地状态目录后重新登录：
 
 ```bash
-openclaw config set plugins.entries.openclaw-weixin.enabled true
-openclaw gateway restart
+rm -rf ~/.claude-weixin
+npm run standalone:login
 ```
