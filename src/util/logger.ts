@@ -64,6 +64,8 @@ function resolveMainLogPath(): string {
 }
 
 let logDirEnsured = false;
+let ensureLogDirPromise: Promise<void> | undefined;
+let writeQueue: Promise<void> = Promise.resolve();
 
 export type Logger = {
   info(message: string): void;
@@ -79,6 +81,37 @@ export type Logger = {
 
 function buildLoggerName(accountId?: string): string {
   return accountId ? `${SUBSYSTEM}/${accountId}` : SUBSYSTEM;
+}
+
+function ensureLogDir(): Promise<void> {
+  if (logDirEnsured) {
+    return Promise.resolve();
+  }
+  if (!ensureLogDirPromise) {
+    ensureLogDirPromise = fs.promises
+      .mkdir(MAIN_LOG_DIR, { recursive: true })
+      .then(() => {
+        logDirEnsured = true;
+      })
+      .catch(() => {
+        // Best-effort; never block on logging failures.
+      })
+      .finally(() => {
+        ensureLogDirPromise = undefined;
+      });
+  }
+  return ensureLogDirPromise;
+}
+
+function enqueueLogWrite(entry: string): void {
+  writeQueue = writeQueue
+    .then(async () => {
+      await ensureLogDir();
+      await fs.promises.appendFile(resolveMainLogPath(), `${entry}\n`, "utf-8");
+    })
+    .catch(() => {
+      // Best-effort; never block on logging failures.
+    });
 }
 
 function writeLog(level: string, message: string, accountId?: string): void {
@@ -103,15 +136,8 @@ function writeLog(level: string, message: string, accountId?: string): void {
     },
     time: toLocalISO(now),
   });
-  try {
-    if (!logDirEnsured) {
-      fs.mkdirSync(MAIN_LOG_DIR, { recursive: true });
-      logDirEnsured = true;
-    }
-    fs.appendFileSync(resolveMainLogPath(), `${entry}\n`, "utf-8");
-  } catch {
-    // Best-effort; never block on logging failures.
-  }
+
+  enqueueLogWrite(entry);
 }
 
 /** Creates a logger instance, optionally bound to a specific account. */

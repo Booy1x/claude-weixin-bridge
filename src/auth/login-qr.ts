@@ -24,8 +24,41 @@ const QR_LONG_POLL_TIMEOUT_MS = 35_000;
 /** Default `bot_type` for ilink get_bot_qrcode / get_qrcode_status (this channel build). */
 export const DEFAULT_ILINK_BOT_TYPE = "3";
 
-/** Fixed API base URL for all QR code requests. */
+/** Default API base URL for QR code requests when caller input is empty. */
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
+
+const TRUSTED_REDIRECT_EXACT_HOSTS = new Set(["ilinkai.weixin.qq.com"]);
+const TRUSTED_REDIRECT_SUFFIXES = [".weixin.qq.com"];
+
+function resolveApiBaseUrl(apiBaseUrl: string): string {
+  const trimmed = apiBaseUrl.trim();
+  return trimmed || FIXED_BASE_URL;
+}
+
+export function isTrustedRedirectHost(redirectHost: string | undefined): boolean {
+  if (!redirectHost) return false;
+
+  const host = redirectHost.trim().toLowerCase();
+  if (!host) return false;
+  if (
+    host.includes("://") ||
+    host.includes("/") ||
+    host.includes("?") ||
+    host.includes("#") ||
+    host.includes("@") ||
+    host.includes(":")
+  ) {
+    return false;
+  }
+
+  if (!/^[a-z0-9.-]+$/.test(host)) return false;
+  if (host.startsWith(".") || host.endsWith(".") || host.includes("..")) return false;
+  if (TRUSTED_REDIRECT_EXACT_HOSTS.has(host)) return true;
+
+  return TRUSTED_REDIRECT_SUFFIXES.some((suffix) =>
+    host.endsWith(suffix) && host.length > suffix.length,
+  );
+}
 
 const activeLogins = new Map<string, ActiveLogin>();
 
@@ -131,7 +164,7 @@ export async function startWeixinLoginWithQr(opts: {
     const botType = opts.botType || DEFAULT_ILINK_BOT_TYPE;
     logger.info(`Starting Weixin login with bot_type=${botType}`);
 
-    const qrResponse = await fetchQRCode(FIXED_BASE_URL, botType);
+    const qrResponse = await fetchQRCode(resolveApiBaseUrl(opts.apiBaseUrl), botType);
     logger.info(
       `QR code received, qrcode=${redactToken(qrResponse.qrcode)} imgContentLen=${qrResponse.qrcode_img_content?.length ?? 0}`,
     );
@@ -195,7 +228,7 @@ export async function waitForWeixinLogin(opts: {
   let qrRefreshCount = 1;
 
   // Initialize the effective polling base URL; may be updated on IDC redirect.
-  activeLogin.currentApiBaseUrl = FIXED_BASE_URL;
+  activeLogin.currentApiBaseUrl = resolveApiBaseUrl(opts.apiBaseUrl);
 
   logger.info("Starting to poll QR code status...");
 
@@ -238,7 +271,8 @@ export async function waitForWeixinLogin(opts: {
 
           try {
             const botType = opts.botType || DEFAULT_ILINK_BOT_TYPE;
-            const qrResponse = await fetchQRCode(FIXED_BASE_URL, botType);
+            const refreshBaseUrl = activeLogin.currentApiBaseUrl ?? resolveApiBaseUrl(opts.apiBaseUrl);
+            const qrResponse = await fetchQRCode(refreshBaseUrl, botType);
             activeLogin.qrcode = qrResponse.qrcode;
             activeLogin.qrcodeUrl = qrResponse.qrcode_img_content;
             activeLogin.startedAt = Date.now();
@@ -266,13 +300,20 @@ export async function waitForWeixinLogin(opts: {
         }
         case "scaned_but_redirect": {
           const redirectHost = statusResponse.redirect_host;
-          if (redirectHost) {
-            const newBaseUrl = `https://${redirectHost}`;
-            activeLogin.currentApiBaseUrl = newBaseUrl;
-            logger.info(`waitForWeixinLogin: IDC redirect, switching polling host to ${redirectHost}`);
-          } else {
-            logger.warn(`waitForWeixinLogin: received scaned_but_redirect but redirect_host is missing, continuing with current host`);
+          if (!redirectHost) {
+            logger.warn("waitForWeixinLogin: received scaned_but_redirect but redirect_host is missing, continuing with current host");
+            break;
           }
+
+          if (!isTrustedRedirectHost(redirectHost)) {
+            logger.warn(`waitForWeixinLogin: untrusted redirect_host=${redirectHost}, keeping current host`);
+            break;
+          }
+
+          const trustedHost = redirectHost.trim().toLowerCase();
+          const newBaseUrl = `https://${trustedHost}`;
+          activeLogin.currentApiBaseUrl = newBaseUrl;
+          logger.info(`waitForWeixinLogin: IDC redirect, switching polling host to ${trustedHost}`);
           break;
         }
         case "confirmed": {

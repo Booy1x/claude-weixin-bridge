@@ -11,6 +11,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "standalone:login": "tsx src/standalone/run.ts login",
     "standalone:run": "tsx src/standalone/run.ts run"
   },
@@ -22,8 +25,10 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4.20.5",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^2.1.9"
   },
   "ilink_appid": "bot"
 }

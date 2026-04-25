@@ -21,8 +21,8 @@ export function redactToken(token: string | undefined, prefixLen = DEFAULT_TOKEN
   return `${token.slice(0, prefixLen)}…(len=${token.length})`;
 }
 
-/** Field names whose values should be masked in logged JSON bodies. */
-const SENSITIVE_FIELDS = /\b(context_token|bot_token|token|authorization|Authorization)\b/;
+/** JSON fields whose values should be masked in logged bodies. */
+const SENSITIVE_JSON_FIELD_NAMES = /(context_token|bot_token|token|authorization)/gi;
 
 /**
  * Truncate a JSON body string to `maxLen` chars for safe logging.
@@ -32,7 +32,7 @@ export function redactBody(body: string | undefined, maxLen = DEFAULT_BODY_MAX_L
   if (!body) return "(empty)";
   // Mask values of known sensitive JSON keys: "key":"value" → "key":"<redacted>"
   const redacted = body.replace(
-    /"(context_token|bot_token|token|authorization|Authorization)"\s*:\s*"[^"]*"/g,
+    new RegExp(`"${SENSITIVE_JSON_FIELD_NAMES.source}"\\s*:\\s*"[^"]*"`, "gi"),
     '"$1":"<redacted>"',
   );
   if (redacted.length <= maxLen) return redacted;
