@@ -1,8 +1,8 @@
-# 微信
+# claude-weixin-bridge
 
 [English](./README.md)
 
-OpenClaw 的微信渠道插件，支持通过扫码完成登录授权。
+一个独立运行的 Claude Code 微信桥接项目，支持通过扫码完成登录授权。
 
 ## 兼容性
 

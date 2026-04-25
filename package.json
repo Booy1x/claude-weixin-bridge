@@ -4,6 +4,14 @@
   "description": "Standalone Claude Code Weixin bridge",
   "license": "MIT",
   "author": "Tencent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Booy1x/claude-weixin-bridge.git"
+  },
+  "homepage": "https://github.com/Booy1x/claude-weixin-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Booy1x/claude-weixin-bridge/issues"
+  },
   "type": "module",
   "files": [
     "src/",

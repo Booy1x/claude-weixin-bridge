@@ -1,8 +1,8 @@
-# WeChat
+# claude-weixin-bridge
 
 [简体中文](./README.zh_CN.md)
 
-OpenClaw's WeChat channel plugin, supporting login authorization via QR code scanning.
+A standalone Claude Code bridge for Weixin, supporting login authorization via QR code scanning.
 
 ## Compatibility
 
