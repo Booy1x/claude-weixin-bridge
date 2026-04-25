@@ -4,72 +4,47 @@
 
 一个独立运行的 Claude Code 微信桥接项目，支持通过扫码完成登录授权。
 
-## 兼容性
+## 概览
 
-| 插件版本 | OpenClaw 版本            | npm dist-tag | 状态   |
-|---------|--------------------------|--------------|--------|
-| 2.1.x   | >=2026.3.22              | `latest`     | 活跃   |
-| 1.0.x   | >=2026.1.0 <2026.3.22    | `legacy`     | 维护中 |
-
-> 插件在启动时会检查宿主版本，如果运行的 OpenClaw 版本超出支持范围，插件将拒绝加载。
+`claude-weixin-bridge` 是一个独立运行的 Claude Code 微信桥接项目，负责扫码登录、消息轮询、媒体上传，以及本地运行时状态管理。
 
 ## 前提条件
 
-已安装 [OpenClaw](https://docs.openclaw.ai/install)（需要 `openclaw` CLI 可用）。
+- Node.js `>=22`
+- 本地可用的 Claude CLI（默认命令为 `claude`，也可以通过 `CLAUDE_CMD` 自定义）
 
-查看版本：`openclaw --version`
-
-## 一键安装
-
-```bash
-npx -y @tencent-weixin/openclaw-weixin-cli install
-```
-
-## 手动安装
-
-如果一键安装不适用，可以按以下步骤手动操作：
-
-### 1. 安装插件
+安装依赖：
 
 ```bash
-openclaw plugins install "@tencent-weixin/openclaw-weixin"
+npm install
 ```
 
-### 2. 启用插件
+## 常用命令
+
+扫码登录：
 
 ```bash
-openclaw config set plugins.entries.openclaw-weixin.enabled true
+npm run standalone:login
 ```
 
-### 3. 扫码登录
+启动独立桥接服务：
 
 ```bash
-openclaw channels login --channel openclaw-weixin
+npm run standalone:run
 ```
 
-终端会显示一个二维码，用手机扫码并在手机上确认授权。确认后，登录凭证会自动保存到本地，无需额外操作。
-
-### 4. 重启 gateway
+运行测试：
 
 ```bash
-openclaw gateway restart
+npm run test:run
 ```
 
-## 添加更多微信账号
+## 运行时说明
 
-```bash
-openclaw channels login --channel openclaw-weixin
-```
-
-每次扫码登录都会创建一个新的账号条目，支持多个微信号同时在线。
-
-## 多账号上下文隔离
-
-默认情况下，私聊可能共用同一会话桶。**多个微信号同时登录**时，建议按「账号 + 渠道 + 对端」隔离：
-
-```bash
-openclaw config set session.dmScope per-account-channel-peer
-```
+- 登录信息和运行时状态默认保存在 `~/.claude-weixin/`
+- 可通过 `CLAUDE_WEIXIN_STATE_DIR` 覆盖状态目录
+- 可通过 `CLAUDE_CMD` 覆盖 Claude 可执行命令
+- 多个微信账号可通过重复扫码登录来管理
 
 ## 后端 API 协议
 

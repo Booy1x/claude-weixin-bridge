@@ -4,73 +4,47 @@
 
 A standalone Claude Code bridge for Weixin, supporting login authorization via QR code scanning.
 
-## Compatibility
+## Overview
 
-| Plugin Version | OpenClaw Version       | npm dist-tag | Status      |
-|---------------|------------------------|--------------|-------------|
-| 2.1.x         | >=2026.3.22            | `latest`     | Active      |
-| 1.0.x         | >=2026.1.0 <2026.3.22  | `legacy`     | Maintenance |
-
-> The plugin checks the host version at startup and will refuse to load if the
-> running OpenClaw version is outside the supported range.
+`claude-weixin-bridge` is a standalone Weixin bridge for Claude Code. It manages QR-code login, message polling, media upload, and local runtime state for a Weixin-connected workflow.
 
 ## Prerequisites
 
-[OpenClaw](https://docs.openclaw.ai/install) must be installed (the `openclaw` CLI needs to be available).
+- Node.js `>=22`
+- A local Claude CLI available as `claude`, or a custom command set via `CLAUDE_CMD`
 
-Check your version: `openclaw --version`
-
-## Quick Install
-
-```bash
-npx -y @tencent-weixin/openclaw-weixin-cli install
-```
-
-## Manual Installation
-
-If the quick install doesn't work, follow these steps manually:
-
-### 1. Install the plugin
+Install dependencies:
 
 ```bash
-openclaw plugins install "@tencent-weixin/openclaw-weixin"
+npm install
 ```
 
-### 2. Enable the plugin
+## Common Commands
+
+Run QR-code login:
 
 ```bash
-openclaw config set plugins.entries.openclaw-weixin.enabled true
+npm run standalone:login
 ```
 
-### 3. QR code login
+Start the standalone bridge:
 
 ```bash
-openclaw channels login --channel openclaw-weixin
+npm run standalone:run
 ```
 
-A QR code will appear in the terminal. Scan it with your phone and confirm the authorization. Once confirmed, the login credentials will be saved locally automatically — no further action is needed.
-
-### 4. Restart the gateway
+Run tests:
 
 ```bash
-openclaw gateway restart
+npm run test:run
 ```
 
-## Adding More WeChat Accounts
+## Runtime Notes
 
-```bash
-openclaw channels login --channel openclaw-weixin
-```
-
-Each QR code login creates a new account entry, supporting multiple WeChat accounts online simultaneously.
-
-## Multi-Account Context Isolation
-
-By default, DMs can share one session bucket. For **multiple logged-in WeChat accounts**, isolate by account + channel + sender:
-
-```bash
-openclaw config set session.dmScope per-account-channel-peer
-```
+- Login and runtime state are stored under `~/.claude-weixin/` by default
+- You can override the state directory with `CLAUDE_WEIXIN_STATE_DIR`
+- You can override the Claude executable with `CLAUDE_CMD`
+- Multiple Weixin accounts are supported by repeated QR-code logins
 
 ## Backend API Protocol
 
