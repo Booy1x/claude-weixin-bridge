@@ -2,11 +2,11 @@
 
 [简体中文](./README.zh_CN.md)
 
-A standalone Claude Code bridge for Weixin, supporting login authorization via QR code scanning.
+A standalone Weixin bridge for Claude Code, with QR-code login, message polling, media upload, and local runtime state management.
 
 ## Overview
 
-`claude-weixin-bridge` is a standalone Weixin bridge for Claude Code. It manages QR-code login, message polling, media upload, and local runtime state for a Weixin-connected workflow.
+`claude-weixin-bridge` is a standalone Weixin bridge for Claude Code. It handles QR-code login, message polling, media upload, and local runtime state for a Weixin-connected workflow.
 
 ## Prerequisites
 

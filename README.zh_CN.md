@@ -2,11 +2,11 @@
 
 [English](./README.md)
 
-一个独立运行的 Claude Code 微信桥接项目，支持通过扫码完成登录授权。
+一个独立运行的 Claude Code 微信桥接项目，提供扫码登录、消息轮询、媒体上传和本地运行时状态管理能力。
 
 ## 概览
 
-`claude-weixin-bridge` 是一个独立运行的 Claude Code 微信桥接项目，负责扫码登录、消息轮询、媒体上传，以及本地运行时状态管理。
+`claude-weixin-bridge` 是一个独立运行的 Claude Code 微信桥接项目，负责扫码登录、消息轮询、媒体上传和本地运行时状态管理。
 
 ## 前提条件
 
