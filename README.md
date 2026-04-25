@@ -48,7 +48,7 @@ npm run test:run
 
 ## Backend API Protocol
 
-This plugin communicates with the backend gateway via HTTP JSON API. Developers integrating with their own backend need to implement the following interfaces.
+This bridge communicates with the backend gateway via HTTP JSON API. Developers integrating with their own backend need to implement the following interfaces.
 
 All endpoints use `POST` with JSON request and response bodies. Common request headers:
 
