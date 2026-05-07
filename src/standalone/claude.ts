@@ -107,10 +107,59 @@ export async function runStandaloneClaude(
   return execClaude(cfg, args);
 }
 
+// ---------------------------------------------------------------------------
+// Session history management (in-memory, per session ID)
+// ---------------------------------------------------------------------------
+
+type Message = { role: "user" | "assistant"; content: string };
+
+const sessionHistories = new Map<string, Message[]>();
+
+export function getHistory(sessionId: string): Message[] {
+  let history = sessionHistories.get(sessionId);
+  if (!history) {
+    history = [];
+    sessionHistories.set(sessionId, history);
+  }
+  return history;
+}
+
+export function loadHistory(sessionId: string, messages: Message[]): void {
+  sessionHistories.set(sessionId, [...messages]);
+}
+
+export function clearClaudeSession(sessionId: string): void {
+  sessionHistories.delete(sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// Run with session history (for desktop-imported sessions)
+// ---------------------------------------------------------------------------
+
 export async function runStandaloneClaudeSession(
   cfg: StandaloneClaudeConfig,
   opts: StandaloneClaudeSessionOptions,
 ): Promise<string> {
-  const args = buildSessionArgs(cfg.argsTemplate, opts);
-  return execClaude(cfg, args);
+  const history = getHistory(opts.sessionId);
+
+  // Build prompt with history context
+  const historyText = history
+    .map((m) => `[${m.role === "user" ? "User" : "Assistant"}]\n${m.content}`)
+    .join("\n\n");
+
+  let fullPrompt: string;
+  if (historyText) {
+    fullPrompt = `Previous conversation:\n${historyText}\n\n---\n\nCurrent message:\n${opts.prompt}`;
+  } else {
+    fullPrompt = opts.prompt;
+  }
+
+  const args = buildSessionArgs(cfg.argsTemplate, { ...opts, prompt: fullPrompt });
+  const text = await execClaude(cfg, args);
+
+  // Update session history
+  history.push({ role: "user", content: opts.prompt });
+  history.push({ role: "assistant", content: text });
+
+  return text;
 }

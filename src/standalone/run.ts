@@ -5,7 +5,8 @@ import { getConfig, getUpdates, sendMessage, sendTyping } from "../api/api.js";
 import { MessageItemType, MessageState, MessageType, TypingStatus, type MessageItem } from "../api/types.js";
 import { generateId } from "../util/random.js";
 
-import { runStandaloneClaudeSession } from "./claude.js";
+import { runStandaloneClaudeSession, loadHistory, getHistory } from "./claude.js";
+import { scanDesktopSessions, extractSessionHistory } from "./import-sessions.js";
 import {
   type StandaloneRuntimeState,
   type StandaloneSessionState,
@@ -48,10 +49,14 @@ function parseEnvList(name: string, fallback: string[]): string[] {
 }
 
 type ParsedCommand =
+  | { type: "list" }
+  | { type: "switch"; target: string }
+  | { type: "new"; project?: string; title: string }
+  | { type: "import"; project?: string; limit: number }
+  | { type: "clear" }
   | { type: "sync"; all: boolean }
   | { type: "projects" }
   | { type: "sessions" }
-  | { type: "new"; project?: string; title: string }
   | { type: "use"; target: string }
   | { type: "project"; target: string };
 
@@ -62,6 +67,54 @@ function parseCommand(rawBody: string): ParsedCommand | null {
   const [headRaw, ...restParts] = body.split(/\s+/);
   const head = headRaw.toLowerCase();
   const rest = restParts.join(" ").trim();
+
+  // / — 列出所有会话
+  if (head === "/") {
+    return { type: "list" };
+  }
+
+  // /1 /2 /3 ... — 按编号切换会话
+  if (/^\/\d+$/.test(head)) {
+    const idx = parseInt(head.slice(1), 10);
+    if (idx >= 1) return { type: "switch", target: String(idx) };
+  }
+
+  // /new [项目] | 标题 — 创建新会话
+  if (head === "/new") {
+    if (!rest) return null;
+    const sepIdx = rest.indexOf("|");
+    if (sepIdx >= 0) {
+      const project = rest.slice(0, sepIdx).trim();
+      const title = rest.slice(sepIdx + 1).trim();
+      if (!title) return null;
+      return { type: "new", project: project || undefined, title };
+    }
+    return { type: "new", title: rest };
+  }
+
+  // /import [项目] [--limit N | --all] — 导入电脑端会话
+  if (head === "/import") {
+    let project: string | undefined;
+    let limit = 10;
+    if (rest) {
+      if (rest.includes("--all")) {
+        limit = 0;
+      } else {
+        const limitMatch = rest.match(/--limit\s+(\d+)/);
+        if (limitMatch) {
+          limit = Math.min(Math.max(parseInt(limitMatch[1], 10), 1), 30);
+        }
+      }
+      const projectPart = rest.replace(/--limit\s+\d+/, "").replace(/--all/, "").trim();
+      if (projectPart) project = projectPart;
+    }
+    return { type: "import" as const, project, limit };
+  }
+
+  // /clear — 清理电脑端导入的会话
+  if (head === "/clear") {
+    return { type: "clear" };
+  }
 
   if (head === "/sync") {
     return { type: "sync", all: rest.toLowerCase() === "all" };
@@ -75,25 +128,6 @@ function parseCommand(rawBody: string): ParsedCommand | null {
     return { type: "sessions" };
   }
 
-  if (head === "/new") {
-    if (!rest) return null;
-    const sepIdx = rest.indexOf("|");
-    if (sepIdx >= 0) {
-      const project = rest.slice(0, sepIdx).trim();
-      const title = rest.slice(sepIdx + 1).trim();
-      if (!title) return null;
-      return {
-        type: "new",
-        project: project || undefined,
-        title,
-      };
-    }
-    return {
-      type: "new",
-      title: rest,
-    };
-  }
-
   if (head === "/use") {
     if (!rest) return null;
     return { type: "use", target: rest };
@@ -102,6 +136,11 @@ function parseCommand(rawBody: string): ParsedCommand | null {
   if (head === "/project") {
     if (!rest) return null;
     return { type: "project", target: rest };
+  }
+
+  // /prj1 /domain 等 — 按项目名切换
+  if (rest.length === 0) {
+    return { type: "switch", target: head.slice(1) };
   }
 
   return null;
@@ -321,6 +360,216 @@ function buildSyncAllCard(user: StandaloneUserRuntimeState): string {
   return trimReplyText(lines.join("\n"));
 }
 
+const DESKTOP_IMPORT_PREFIX = "desktop-";
+
+function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { project?: string; limit: number }): string {
+  const allSessions = scanDesktopSessions();
+  if (allSessions.length === 0) {
+    return "未在 ~/.claude/projects/ 下找到任何会话。";
+  }
+
+  let filtered = allSessions;
+  if (opts.project) {
+    const keyword = opts.project.toLowerCase();
+    filtered = allSessions.filter(
+      (s) => s.projectName.toLowerCase().includes(keyword) || s.sessionId.toLowerCase().includes(keyword),
+    );
+    if (filtered.length === 0) {
+      const projects = [...new Set(allSessions.map((s) => s.projectName))];
+      return trimReplyText([
+        `未找到匹配 "${opts.project}" 的项目。`,
+        `可用项目: ${projects.slice(0, 5).join(", ")}${projects.length > 5 ? "..." : ""}`,
+        "",
+        "用法: /import [项目名] [--limit N] [--all]",
+      ].join("\n"));
+    }
+  }
+
+  const alreadyImported = Object.values(userRuntime.sessions).filter(
+    (s) => s.source === "desktop",
+  ).length;
+
+  const candidates = filtered.filter(
+    (ds) => !Object.values(userRuntime.sessions).some(
+      (s) => s.source === "desktop" && s.desktopSessionId === ds.sessionId,
+    ),
+  );
+
+  const toImportCount = opts.limit <= 0 ? candidates.length : Math.min(opts.limit, candidates.length);
+  const toImport = candidates.slice(0, toImportCount);
+  const now = new Date().toISOString();
+
+  for (const ds of toImport) {
+    const localId = `${DESKTOP_IMPORT_PREFIX}${ds.sessionId.slice(0, 12)}`;
+    const session: StandaloneSessionState = {
+      id: localId,
+      claudeSessionId: ds.sessionId,
+      title: ds.firstPrompt,
+      project: ds.projectName,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      turnCount: ds.userTurnCount,
+      initialized: ds.userTurnCount > 0,
+      lastUserText: ds.lastPrompt.length > 80 ? `${ds.lastPrompt.slice(0, 80)}…` : ds.lastPrompt,
+      lastAssistantText: undefined,
+      source: "desktop",
+      desktopJsonlPath: ds.jsonlPath,
+      desktopSessionId: ds.sessionId,
+    };
+
+    userRuntime.sessions[localId] = session;
+    userRuntime.sessionOrder.push(localId);
+  }
+
+  const projectMap = new Map<string, typeof toImport>();
+  for (const ds of toImport) {
+    const p = ds.projectName ? ds.projectName.split("/").pop() || "(unknown)" : "(unknown)";
+    const group = projectMap.get(p) || [];
+    group.push(ds);
+    projectMap.set(p, group);
+  }
+
+  const summaryLines: string[] = [];
+  for (const [project, sessions] of projectMap) {
+    const titles = sessions.map(ds => {
+      const t = ds.firstPrompt.length > 20 ? ds.firstPrompt.slice(0, 20) + "…" : ds.firstPrompt;
+      return t;
+    });
+    summaryLines.push(`[${project}] ${titles.join(" / ")}`);
+  }
+
+  const moreLine = toImport.length > 10 ? `\n...还有 ${toImport.length - 10} 个` : "";
+  const filterLabel = opts.project ? ` (项目: ${opts.project})` : "";
+
+  const totalDesktop = Object.values(userRuntime.sessions).filter((s) => s.source === "desktop").length;
+  const remaining = candidates.length - toImport.length;
+
+  return [
+    `[IMPORT]${filterLabel} 导入 ${toImport.length} 个，已导入 ${totalDesktop} 个，还可导入 ${remaining} 个`,
+    "",
+    ...summaryLines,
+    moreLine,
+    "",
+    "/ 查看编号，/编号 切换",
+  ].join("\n");
+}
+
+function handleSwitchAndLoadContext(userRuntime: StandaloneUserRuntimeState, target: StandaloneSessionState): string {
+  userRuntime.focusedSessionId = target.id;
+  touchSession(userRuntime, target.id);
+  syncFocusedProjectFromSession(userRuntime, target);
+
+  let contextInfo = "";
+  if (target.source === "desktop" && target.desktopJsonlPath) {
+    const history = extractSessionHistory(target.desktopJsonlPath, 5, 1000);
+    console.log(`[CONTEXT] session=${target.id} claudeSessionId=${target.claudeSessionId} history=${history.length} msgs`);
+    if (history.length > 0) {
+      loadHistory(target.claudeSessionId, history);
+      const loaded = getHistory(target.claudeSessionId);
+      console.log(`[CONTEXT] loaded=${loaded.length} msgs for session=${target.claudeSessionId}`);
+      contextInfo = ` (已加载 ${history.length} 条历史消息)`;
+    } else {
+      contextInfo = " (历史消息为空，将作为新对话)";
+    }
+  }
+
+  const sourceLabel = target.source === "desktop" ? "📎电脑端" : "📱微信端";
+  const lines = [
+    "已切换。",
+    sourceLabel + contextInfo,
+    `项目: ${target.project || "(未设置)"}`,
+    `任务: ${target.title}`,
+    `已对话 ${target.turnCount} 轮`,
+  ];
+  if (target.lastUserText) {
+    lines.push(`最近: ${target.lastUserText}`);
+  }
+  if (target.source === "desktop") {
+    lines.push("直接回复继续，上下文已同步。");
+  }
+
+  return trimReplyText(lines.join("\n"));
+}
+
+function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
+  const lines: string[] = ["[任务列表]"];
+  const totalCount = user.sessionOrder.length;
+
+  if (totalCount === 0) {
+    lines.push("暂无任务。用 /new <标题> 创建，或 /import 导入电脑端会话。");
+    return trimReplyText(lines.join("\n"));
+  }
+
+  const desktopItems: Array<{ id: string; session: StandaloneSessionState }> = [];
+  const localItems: Array<{ id: string; session: StandaloneSessionState }> = [];
+
+  for (const id of user.sessionOrder) {
+    const s = user.sessions[id];
+    if (!s) continue;
+    if (s.source === "desktop") {
+      desktopItems.push({ id, session: s });
+    } else {
+      localItems.push({ id, session: s });
+    }
+  }
+
+  let idx = 0;
+
+  if (desktopItems.length > 0) {
+    lines.push(`📎 电脑端 (${desktopItems.length}个)：`);
+    const projectMap = new Map<string, typeof desktopItems>();
+    for (const item of desktopItems) {
+      const p = item.session.project ? item.session.project.split("/").pop() || "(unknown)" : "(unknown)";
+      const group = projectMap.get(p) || [];
+      group.push(item);
+      projectMap.set(p, group);
+    }
+    for (const [project, items] of projectMap) {
+      lines.push(`  [${project}]`);
+      for (const item of items) {
+        idx++;
+        const focused = user.focusedSessionId === item.id;
+        const prefix = focused ? "*" : " ";
+        const title = item.session.title.length > 22 ? `${item.session.title.slice(0, 22)}…` : item.session.title;
+        lines.push(`  ${prefix}${idx}. ${title}`);
+      }
+    }
+  }
+
+  if (localItems.length > 0) {
+    lines.push(`📱 微信端 (${localItems.length}个)：`);
+    for (const item of localItems) {
+      idx++;
+      const focused = user.focusedSessionId === item.id;
+      const prefix = focused ? "*" : " ";
+      const title = item.session.title.length > 25 ? `${item.session.title.slice(0, 25)}…` : item.session.title;
+      lines.push(`  ${prefix}${idx}. ${title}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("/ 查看，/编号 切换，/new 创建，/clear 清理");
+  return trimReplyText(lines.join("\n"));
+}
+
+function handleClearCommand(userRuntime: StandaloneUserRuntimeState): string {
+  let removed = 0;
+  for (const [id, session] of Object.entries(userRuntime.sessions)) {
+    if (session.source === "desktop") {
+      delete userRuntime.sessions[id];
+      removed++;
+    }
+  }
+  userRuntime.sessionOrder = userRuntime.sessionOrder.filter((id) => userRuntime.sessions[id] !== undefined);
+
+  if (userRuntime.focusedSessionId && !userRuntime.sessions[userRuntime.focusedSessionId]) {
+    userRuntime.focusedSessionId = undefined;
+  }
+
+  return "已清理 " + removed + " 个电脑端导入的会话。当前剩余 " + userRuntime.sessionOrder.length + " 个。";
+}
+
 function buildProjectsCard(user: StandaloneUserRuntimeState): string {
   const lines: string[] = ["[PROJECTS]"];
   const groups = listProjects(user);
@@ -484,10 +733,15 @@ async function cmdRun(): Promise<void> {
           let replyText = "";
 
           const command = parseCommand(body);
-          if (command?.type === "projects") {
-            replyText = buildProjectsCard(userRuntime);
-          } else if (command?.type === "sessions") {
-            replyText = buildSessionsCard(userRuntime);
+          if (command?.type === "list") {
+            replyText = buildSessionsListCard(userRuntime);
+          } else if (command?.type === "switch") {
+            const target = resolveSessionByTarget(userRuntime, command.target);
+            if (!target) {
+              replyText = "未找到: " + command.target;
+            } else {
+              replyText = handleSwitchAndLoadContext(userRuntime, target);
+            }
           } else if (command?.type === "new") {
             const created = createSession(userRuntime, {
               project: command.project,
@@ -525,6 +779,10 @@ async function cmdRun(): Promise<void> {
                 `任务: ${target.title}`,
               ].join("\n"));
             }
+          } else if (command?.type === "import") {
+            replyText = handleImportCommand(userRuntime, { project: command.project, limit: command.limit });
+          } else if (command?.type === "clear") {
+            replyText = handleClearCommand(userRuntime);
           } else if (command?.type === "sync" && command.all) {
             replyText = buildSyncAllCard(userRuntime);
           } else {

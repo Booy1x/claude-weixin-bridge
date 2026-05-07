@@ -25,6 +25,12 @@ export type StandaloneSessionState = {
   initialized: boolean;
   lastUserText?: string;
   lastAssistantText?: string;
+  /** "local" = created in Weixin, "desktop" = imported from ~/.claude/projects */
+  source?: "local" | "desktop";
+  /** Absolute path to the desktop session jsonl file (only for source=desktop) */
+  desktopJsonlPath?: string;
+  /** Original Claude session UUID (only for source=desktop) */
+  desktopSessionId?: string;
 };
 
 export type StandaloneUserRuntimeState = {
@@ -78,6 +84,9 @@ function normalizeSession(sessionId: string, raw: unknown): StandaloneSessionSta
   const initialized = typeof raw.initialized === "boolean" ? raw.initialized : turnCount > 0;
   const lastUserText = typeof raw.lastUserText === "string" ? raw.lastUserText : undefined;
   const lastAssistantText = typeof raw.lastAssistantText === "string" ? raw.lastAssistantText : undefined;
+  const source: "local" | "desktop" | undefined = raw.source === "desktop" ? "desktop" : (raw.source === "local" ? "local" : undefined);
+  const desktopJsonlPath = typeof raw.desktopJsonlPath === "string" ? raw.desktopJsonlPath : undefined;
+  const desktopSessionId = typeof raw.desktopSessionId === "string" ? raw.desktopSessionId : undefined;
 
   return {
     id,
@@ -91,6 +100,9 @@ function normalizeSession(sessionId: string, raw: unknown): StandaloneSessionSta
     initialized,
     lastUserText,
     lastAssistantText,
+    source,
+    desktopJsonlPath,
+    desktopSessionId,
   };
 }
 
