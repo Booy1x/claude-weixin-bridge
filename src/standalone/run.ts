@@ -431,15 +431,18 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
   }
 
   const summaryLines: string[] = [];
-  for (const [project, sessions] of projectMap) {
-    const titles = sessions.map(ds => {
-      const t = ds.firstPrompt.length > 20 ? ds.firstPrompt.slice(0, 20) + "…" : ds.firstPrompt;
-      return t;
-    });
-    summaryLines.push(`[${project}] ${titles.join(" / ")}`);
+  let idx = 0;
+  for (const [project, items] of projectMap) {
+    summaryLines.push(`[${project}]`);
+    for (const ds of items) {
+      idx++;
+      const t = ds.firstPrompt.length > 30 ? ds.firstPrompt.slice(0, 30) + "…" : ds.firstPrompt;
+      summaryLines.push(`${idx}. ${t}`);
+    }
+    summaryLines.push("");
   }
 
-  const moreLine = toImport.length > 10 ? `\n...还有 ${toImport.length - 10} 个` : "";
+  const moreLine = toImport.length > 10 ? `...还有 ${toImport.length - 10} 个` : "";
   const filterLabel = opts.project ? ` (项目: ${opts.project})` : "";
 
   const totalDesktop = Object.values(userRuntime.sessions).filter((s) => s.source === "desktop").length;
@@ -450,8 +453,7 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
     "",
     ...summaryLines,
     moreLine,
-    "",
-    "/ 查看编号，/编号 切换",
+    "/ 查看，/编号 切换",
   ].join("\n");
 }
 
@@ -517,7 +519,7 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
   let idx = 0;
 
   if (desktopItems.length > 0) {
-    lines.push(`📎 电脑端 (${desktopItems.length}个)：`);
+    lines.push("", `📎 电脑端 (${desktopItems.length}个)：`);
     const projectMap = new Map<string, typeof desktopItems>();
     for (const item of desktopItems) {
       const p = item.session.project ? item.session.project.split("/").pop() || "(unknown)" : "(unknown)";
@@ -526,14 +528,15 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
       projectMap.set(p, group);
     }
     for (const [project, items] of projectMap) {
-      lines.push(`  [${project}]`);
+      lines.push(`[${project}]`);
       for (const item of items) {
         idx++;
         const focused = user.focusedSessionId === item.id;
-        const prefix = focused ? "*" : " ";
-        const title = item.session.title.length > 22 ? `${item.session.title.slice(0, 22)}…` : item.session.title;
-        lines.push(`  ${prefix}${idx}. ${title}`);
+        const prefix = focused ? "▸" : " ";
+        const title = item.session.title.length > 30 ? `${item.session.title.slice(0, 30)}…` : item.session.title;
+        lines.push(`${prefix}${idx}. ${title}`);
       }
+      lines.push("");
     }
   }
 
@@ -542,13 +545,13 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
     for (const item of localItems) {
       idx++;
       const focused = user.focusedSessionId === item.id;
-      const prefix = focused ? "*" : " ";
-      const title = item.session.title.length > 25 ? `${item.session.title.slice(0, 25)}…` : item.session.title;
-      lines.push(`  ${prefix}${idx}. ${title}`);
+      const prefix = focused ? "▸" : " ";
+      const title = item.session.title.length > 30 ? `${item.session.title.slice(0, 30)}…` : item.session.title;
+      lines.push(`${prefix}${idx}. ${title}`);
     }
+    lines.push("");
   }
 
-  lines.push("");
   lines.push("/ 查看，/编号 切换，/new 创建，/clear 清理");
   return trimReplyText(lines.join("\n"));
 }
