@@ -60,19 +60,48 @@ function pickEnv(allowlist: string[]): NodeJS.ProcessEnv {
   return env;
 }
 
-function parseClaudeOutput(output: string): string {
-  const trimmed = output.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed = JSON.parse(trimmed) as { text?: string };
-    if (typeof parsed.text === "string") return parsed.text;
-  } catch {
-    // plain text output path
-  }
-  return trimmed;
+interface ClaudeOutput {
+  text: string;
+  toolSummaries: string[];
 }
 
-async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<string> {
+function parseClaudeOutput(output: string): ClaudeOutput {
+  const trimmed = output.trim();
+  if (!trimmed) return { text: "", toolSummaries: [] };
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      text?: string;
+      content?: Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }>;
+    };
+    const text = parsed.text || "";
+    const toolSummaries: string[] = [];
+
+    // Extract tool_use blocks from content array
+    if (Array.isArray(parsed.content)) {
+      for (const block of parsed.content) {
+        if (block.type === "tool_use" && block.name) {
+          const input = block.input || {};
+          let detail = "";
+          if (block.name === "Write" && input.file_path) {
+            detail = String(input.file_path);
+          } else if (block.name === "Edit" && input.file_path) {
+            detail = String(input.file_path);
+          } else if (block.name === "Read" && input.file_path) {
+            detail = String(input.file_path);
+          }
+          toolSummaries.push(detail ? `${block.name} ${detail}` : block.name);
+        }
+      }
+    }
+
+    return { text, toolSummaries };
+  } catch {
+    // plain text output path
+    return { text: trimmed, toolSummaries: [] };
+  }
+}
+
+async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<ClaudeOutput> {
   const env = pickEnv(cfg.envAllowlist);
 
   const stdout = await new Promise<string>((resolve, reject) => {
@@ -94,14 +123,17 @@ async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<
     );
   });
 
-  const text = parseClaudeOutput(stdout);
-  return text.length > cfg.maxOutputChars ? text.slice(0, cfg.maxOutputChars) : text;
+  const result = parseClaudeOutput(stdout);
+  if (result.text.length > cfg.maxOutputChars) {
+    result.text = result.text.slice(0, cfg.maxOutputChars);
+  }
+  return result;
 }
 
 export async function runStandaloneClaude(
   input: StandaloneClaudeInput,
   cfg: StandaloneClaudeConfig,
-): Promise<string> {
+): Promise<ClaudeOutput> {
   const prompt = buildPrompt(input, cfg.systemPrompt);
   const args = buildArgs(cfg.argsTemplate, prompt);
   return execClaude(cfg, args);
@@ -139,7 +171,7 @@ export function clearClaudeSession(sessionId: string): void {
 export async function runStandaloneClaudeSession(
   cfg: StandaloneClaudeConfig,
   opts: StandaloneClaudeSessionOptions,
-): Promise<string> {
+): Promise<ClaudeOutput> {
   const history = getHistory(opts.sessionId);
 
   // Build prompt with history context
@@ -155,11 +187,11 @@ export async function runStandaloneClaudeSession(
   }
 
   const args = buildSessionArgs(cfg.argsTemplate, { ...opts, prompt: fullPrompt });
-  const text = await execClaude(cfg, args);
+  const result = await execClaude(cfg, args);
 
   // Update session history
   history.push({ role: "user", content: opts.prompt });
-  history.push({ role: "assistant", content: text });
+  history.push({ role: "assistant", content: result.text });
 
-  return text;
+  return result;
 }

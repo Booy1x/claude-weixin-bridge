@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 
 import { startWeixinLoginWithQr, waitForWeixinLogin } from "../auth/login-qr.js";
 import { getConfig, getUpdates, sendMessage, sendTyping } from "../api/api.js";
@@ -795,27 +796,58 @@ async function cmdRun(): Promise<void> {
 
             if (command?.type === "sync") {
               try {
-                const syncText = await runStandaloneClaudeSession(claudeCfg, {
+                const result = await runStandaloneClaudeSession(claudeCfg, {
                   mode: "sync",
                   sessionId: session.claudeSessionId,
                   prompt: buildSyncPrompt(session),
                 });
-                replyText = trimReplyText(syncText || buildSyncCardForSession(session));
+                replyText = trimReplyText(result.text || buildSyncCardForSession(session));
               } catch {
                 replyText = buildSyncCardForSession(session);
               }
             } else {
+              let toolSummaries: string[] = [];
               try {
-                replyText = await runStandaloneClaudeSession(claudeCfg, {
+                const result = await runStandaloneClaudeSession(claudeCfg, {
                   mode: "chat",
                   sessionId: session.claudeSessionId,
                   prompt: body,
                   startNewSession: !session.initialized,
                 });
+                replyText = result.text;
+                toolSummaries = result.toolSummaries;
               } catch (err) {
                 replyText = `Claude 调用失败: ${String(err)}`;
               }
               updateSessionFromTurn(session, body, replyText);
+
+              // Append file change summary to reply
+              if (toolSummaries.length > 0) {
+                const summary = toolSummaries.map(s => `✅ ${s}`).join("\n");
+                replyText = `${replyText}\n\n---\n${summary}`;
+              }
+            }
+
+            // Sync conversation to desktop jsonl (raw text only, no tool summary suffix)
+            if (session.source === "desktop" && session.desktopJsonlPath) {
+              try {
+                const timestamp = new Date().toISOString();
+                const userEntry = JSON.stringify({
+                  type: "user",
+                  message: { role: "user", content: body },
+                  timestamp,
+                });
+                // Strip tool summary suffix before writing to jsonl
+                const cleanReply = replyText.replace(/\n\n---\n(✅ .+\n?)+$/, "");
+                const asstEntry = JSON.stringify({
+                  type: "assistant",
+                  message: { role: "assistant", content: cleanReply },
+                  timestamp,
+                });
+                fs.appendFileSync(session.desktopJsonlPath, `\n${userEntry}\n${asstEntry}`, "utf-8");
+              } catch (syncErr) {
+                console.error(`[SYNC] failed to write jsonl: ${String(syncErr)}`);
+              }
             }
           }
 
