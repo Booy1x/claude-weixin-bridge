@@ -44,14 +44,19 @@ function isMeaningfulPrompt(text: string): boolean {
   return true;
 }
 
-function getSessionTitle(jsonlPath: string, firstPrompt: string): string {
+function getSessionTitle(jsonlPath: string, firstPrompt: string, projectName?: string): string {
   try {
     const lines = fs.readFileSync(jsonlPath, "utf-8").split("\n").filter(Boolean);
     for (const line of lines) {
       try {
         const entry = JSON.parse(line) as JsonlEntry;
         if (entry.type === "custom-title" && entry.customTitle?.trim()) {
-          return entry.customTitle.trim();
+          const ct = entry.customTitle.trim();
+          // If custom-title is just the project name, prefer firstPrompt for variety
+          if (projectName && ct === projectName && firstPrompt && firstPrompt !== projectName) {
+            break;
+          }
+          return ct;
         }
       } catch {
         // skip
@@ -75,7 +80,7 @@ function scanSessionFile(jsonlPath: string, projectPath: string, projectName: st
     if (lines.length === 0) return null;
 
     const sessionId = path.basename(jsonlPath, ".jsonl");
-    let firstPrompt = "";
+    const userPrompts: string[] = [];
     let lastPrompt = "";
     let userTurnCount = 0;
     let lastActivity = "";
@@ -86,7 +91,7 @@ function scanSessionFile(jsonlPath: string, projectPath: string, projectName: st
         if (entry.type === "user" && entry.message?.role === "user") {
           const text = extractTextContent(entry.message.content);
           if (isMeaningfulPrompt(text)) {
-            if (!firstPrompt) firstPrompt = text;
+            userPrompts.push(text);
             lastPrompt = text;
             userTurnCount++;
           }
@@ -99,7 +104,15 @@ function scanSessionFile(jsonlPath: string, projectPath: string, projectName: st
 
     if (userTurnCount === 0) return null;
 
-    const title = getSessionTitle(jsonlPath, firstPrompt);
+    // Pick a good title: prefer custom-title, then first prompt that differs from project name
+    let firstPrompt = userPrompts[0] || "";
+    // If first prompt is just the project name, try to find a more descriptive one
+    if (firstPrompt.length <= 4 || firstPrompt === projectName) {
+      const better = userPrompts.find(p => p.length > 4 && p !== projectName);
+      if (better) firstPrompt = better;
+    }
+
+    const title = getSessionTitle(jsonlPath, firstPrompt, projectName);
 
     return {
       sessionId,
