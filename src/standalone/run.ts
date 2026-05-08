@@ -54,12 +54,7 @@ type ParsedCommand =
   | { type: "switch"; target: string }
   | { type: "new"; project?: string; title: string }
   | { type: "import"; project?: string; limit: number }
-  | { type: "clear" }
-  | { type: "sync"; all: boolean }
-  | { type: "projects" }
-  | { type: "sessions" }
-  | { type: "use"; target: string }
-  | { type: "project"; target: string };
+  | { type: "clear" };
 
 function parseCommand(rawBody: string): ParsedCommand | null {
   const body = rawBody.trim();
@@ -115,28 +110,6 @@ function parseCommand(rawBody: string): ParsedCommand | null {
   // /clear — 清理电脑端导入的会话
   if (head === "/clear") {
     return { type: "clear" };
-  }
-
-  if (head === "/sync") {
-    return { type: "sync", all: rest.toLowerCase() === "all" };
-  }
-
-  if (head === "/projects") {
-    return { type: "projects" };
-  }
-
-  if (head === "/sessions") {
-    return { type: "sessions" };
-  }
-
-  if (head === "/use") {
-    if (!rest) return null;
-    return { type: "use", target: rest };
-  }
-
-  if (head === "/project") {
-    if (!rest) return null;
-    return { type: "project", target: rest };
   }
 
   // /prj1 /domain 等 — 按项目名切换
@@ -431,11 +404,6 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
     userRuntime.sessionOrder.splice(insertAt + i, 0, localId);
   }
 
-  // Auto-switch to first imported session
-  const firstImportedId = `${DESKTOP_IMPORT_PREFIX}${toImport[0].sessionId.slice(0, 12)}`;
-  userRuntime.focusedSessionId = firstImportedId;
-  const switchedSession = userRuntime.sessions[firstImportedId];
-
   // Build summary grouped by project
   const projectMap = new Map<string, typeof toImport>();
   for (const ds of toImport) {
@@ -465,11 +433,9 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
   return [
     `[IMPORT]${filterLabel} 导入 ${toImport.length} 个，已导入 ${totalDesktop} 个，还可导入 ${remaining} 个`,
     "",
-    `▸ 已切换到: ${switchedSession?.title?.slice(0, 40) || "(unknown)"}`,
-    "",
     ...summaryLines,
     moreLine,
-    "/ 查看列表，/编号 切换其他",
+    "发 /编号 切换，如 /1",
   ].join("\n");
 }
 
@@ -565,7 +531,7 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
     lines.push("");
   }
 
-  lines.push("/ 查看，/编号 切换，/new 创建，/clear 清理");
+  lines.push("/ 查看列表，/编号 切换，/new 创建，/clear 清理");
   return trimReplyText(lines.join("\n"));
 }
 
@@ -769,92 +735,41 @@ async function cmdRun(): Promise<void> {
               `任务: ${created.title}`,
               `编号: ${created.id}`,
             ].join("\n"));
-          } else if (command?.type === "project") {
-            const projectName = resolveProjectName(userRuntime, command.target);
-            if (!projectName) {
-              replyText = `未找到项目: ${command.target}`;
-            } else {
-              const session = switchFocusedProject(userRuntime, projectName);
-              replyText = trimReplyText([
-                "已切换当前项目。",
-                `项目: ${projectName}`,
-                `当前任务: ${session?.title || "暂无，直接发消息会新建任务"}`,
-              ].join("\n"));
-            }
-          } else if (command?.type === "use") {
-            const target = resolveSessionByTarget(userRuntime, command.target);
-            if (!target) {
-              replyText = `未找到任务: ${command.target}`;
-            } else {
-              userRuntime.focusedSessionId = target.id;
-              touchSession(userRuntime, target.id);
-              syncFocusedProjectFromSession(userRuntime, target);
-              replyText = trimReplyText([
-                "已切换当前任务。",
-                `项目: ${target.project || "(未设置)"}`,
-                `任务: ${target.title}`,
-              ].join("\n"));
-            }
           } else if (command?.type === "import") {
             replyText = handleImportCommand(userRuntime, { project: command.project, limit: command.limit });
           } else if (command?.type === "clear") {
             replyText = handleClearCommand(userRuntime);
-          } else if (command?.type === "sync" && command.all) {
-            replyText = buildSyncAllCard(userRuntime);
           } else {
             const session = ensureFocusedSession(userRuntime);
             touchSession(userRuntime, session.id);
             syncFocusedProjectFromSession(userRuntime, session);
 
-            if (command?.type === "sync") {
-              try {
-                const result = await runStandaloneClaudeSession(claudeCfg, {
-                  mode: "sync",
-                  sessionId: session.claudeSessionId,
-                  prompt: buildSyncPrompt(session),
-                });
-                replyText = trimReplyText(result.text || buildSyncCardForSession(session));
-              } catch {
-                replyText = buildSyncCardForSession(session);
-              }
-            } else {
-              let toolSummaries: string[] = [];
-              try {
-                const result = await runStandaloneClaudeSession(claudeCfg, {
-                  mode: "chat",
-                  sessionId: session.claudeSessionId,
-                  prompt: body,
-                });
-                replyText = result.text;
-                toolSummaries = result.toolSummaries;
-              } catch (err) {
-                replyText = `Claude 调用失败: ${String(err)}`;
-              }
-              updateSessionFromTurn(session, body, replyText);
+            let toolSummaries: string[] = [];
+            try {
+              const result = await runStandaloneClaudeSession(claudeCfg, {
+                mode: "chat",
+                sessionId: session.claudeSessionId,
+                prompt: body,
+              });
+              replyText = result.text;
+              toolSummaries = result.toolSummaries;
+            } catch (err) {
+              replyText = `Claude 调用失败: ${String(err)}`;
+            }
+            updateSessionFromTurn(session, body, replyText);
 
-              // Append file change summary to reply
-              if (toolSummaries.length > 0) {
-                const summary = toolSummaries.map(s => `✅ ${s}`).join("\n");
-                replyText = `${replyText}\n\n---\n${summary}`;
-              }
+            if (toolSummaries.length > 0) {
+              const summary = toolSummaries.map(s => `✅ ${s}`).join("\n");
+              replyText = `${replyText}\n\n---\n${summary}`;
             }
 
-            // Sync conversation to desktop jsonl (raw text only, no tool summary suffix)
+            // Sync to desktop jsonl
             if (session.source === "desktop" && session.desktopJsonlPath) {
               try {
                 const timestamp = new Date().toISOString();
-                const userEntry = JSON.stringify({
-                  type: "user",
-                  message: { role: "user", content: body },
-                  timestamp,
-                });
-                // Strip tool summary suffix before writing to jsonl
+                const userEntry = JSON.stringify({ type: "user", message: { role: "user", content: body }, timestamp });
                 const cleanReply = replyText.replace(/\n\n---\n(✅ .+\n?)+$/, "");
-                const asstEntry = JSON.stringify({
-                  type: "assistant",
-                  message: { role: "assistant", content: cleanReply },
-                  timestamp,
-                });
+                const asstEntry = JSON.stringify({ type: "assistant", message: { role: "assistant", content: cleanReply }, timestamp });
                 fs.appendFileSync(session.desktopJsonlPath, `\n${userEntry}\n${asstEntry}`, "utf-8");
               } catch (syncErr) {
                 console.error(`[SYNC] failed to write jsonl: ${String(syncErr)}`);
