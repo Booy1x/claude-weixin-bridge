@@ -400,7 +400,14 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
   const toImport = candidates.slice(0, toImportCount);
   const now = new Date().toISOString();
 
-  for (const ds of toImport) {
+  // Insert new sessions right after current focused session (or at front if none)
+  const focusedIdx = userRuntime.focusedSessionId
+    ? userRuntime.sessionOrder.indexOf(userRuntime.focusedSessionId)
+    : -1;
+  const insertAt = focusedIdx >= 0 ? focusedIdx + 1 : 0;
+
+  for (let i = 0; i < toImport.length; i++) {
+    const ds = toImport[i];
     const localId = `${DESKTOP_IMPORT_PREFIX}${ds.sessionId.slice(0, 12)}`;
     const session: StandaloneSessionState = {
       id: localId,
@@ -420,9 +427,16 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
     };
 
     userRuntime.sessions[localId] = session;
-    userRuntime.sessionOrder.push(localId);
+    // Insert after focused session so /1 picks up the first imported one
+    userRuntime.sessionOrder.splice(insertAt + i, 0, localId);
   }
 
+  // Auto-switch to first imported session
+  const firstImportedId = `${DESKTOP_IMPORT_PREFIX}${toImport[0].sessionId.slice(0, 12)}`;
+  userRuntime.focusedSessionId = firstImportedId;
+  const switchedSession = userRuntime.sessions[firstImportedId];
+
+  // Build summary grouped by project
   const projectMap = new Map<string, typeof toImport>();
   for (const ds of toImport) {
     const p = ds.projectName ? ds.projectName.split("/").pop() || "(unknown)" : "(unknown)";
@@ -445,16 +459,17 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
 
   const moreLine = toImport.length > 10 ? `...还有 ${toImport.length - 10} 个` : "";
   const filterLabel = opts.project ? ` (项目: ${opts.project})` : "";
-
   const totalDesktop = Object.values(userRuntime.sessions).filter((s) => s.source === "desktop").length;
   const remaining = candidates.length - toImport.length;
 
   return [
     `[IMPORT]${filterLabel} 导入 ${toImport.length} 个，已导入 ${totalDesktop} 个，还可导入 ${remaining} 个`,
     "",
+    `▸ 已切换到: ${switchedSession?.title?.slice(0, 40) || "(unknown)"}`,
+    "",
     ...summaryLines,
     moreLine,
-    "/ 查看，/编号 切换",
+    "/ 查看列表，/编号 切换其他",
   ].join("\n");
 }
 
@@ -504,23 +519,22 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
     return trimReplyText(lines.join("\n"));
   }
 
-  const desktopItems: Array<{ id: string; session: StandaloneSessionState }> = [];
-  const localItems: Array<{ id: string; session: StandaloneSessionState }> = [];
-
-  for (const id of user.sessionOrder) {
+  // Build flat list with global indices (matching /1 /2 /3 ...)
+  // Then group by project for display, but keep original indices
+  const items: Array<{ id: string; session: StandaloneSessionState; globalIdx: number; isDesktop: boolean }> = [];
+  for (let i = 0; i < user.sessionOrder.length; i++) {
+    const id = user.sessionOrder[i];
     const s = user.sessions[id];
     if (!s) continue;
-    if (s.source === "desktop") {
-      desktopItems.push({ id, session: s });
-    } else {
-      localItems.push({ id, session: s });
-    }
+    items.push({ id, session: s, globalIdx: i + 1, isDesktop: s.source === "desktop" });
   }
 
-  let idx = 0;
+  const desktopItems = items.filter(x => x.isDesktop);
+  const localItems = items.filter(x => !x.isDesktop);
 
   if (desktopItems.length > 0) {
     lines.push("", `📎 电脑端 (${desktopItems.length}个)：`);
+    // Group by project for display
     const projectMap = new Map<string, typeof desktopItems>();
     for (const item of desktopItems) {
       const p = item.session.project ? item.session.project.split("/").pop() || "(unknown)" : "(unknown)";
@@ -528,14 +542,13 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
       group.push(item);
       projectMap.set(p, group);
     }
-    for (const [project, items] of projectMap) {
+    for (const [project, groupItems] of projectMap) {
       lines.push(`[${project}]`);
-      for (const item of items) {
-        idx++;
+      for (const item of groupItems) {
         const focused = user.focusedSessionId === item.id;
         const prefix = focused ? "▸" : " ";
         const title = item.session.title.length > 30 ? `${item.session.title.slice(0, 30)}…` : item.session.title;
-        lines.push(`${prefix}${idx}. ${title}`);
+        lines.push(`${prefix}${item.globalIdx}. ${title}`);
       }
       lines.push("");
     }
@@ -544,11 +557,10 @@ function buildSessionsListCard(user: StandaloneUserRuntimeState): string {
   if (localItems.length > 0) {
     lines.push(`📱 微信端 (${localItems.length}个)：`);
     for (const item of localItems) {
-      idx++;
       const focused = user.focusedSessionId === item.id;
       const prefix = focused ? "▸" : " ";
       const title = item.session.title.length > 30 ? `${item.session.title.slice(0, 30)}…` : item.session.title;
-      lines.push(`${prefix}${idx}. ${title}`);
+      lines.push(`${prefix}${item.globalIdx}. ${title}`);
     }
     lines.push("");
   }
