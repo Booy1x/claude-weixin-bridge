@@ -812,7 +812,6 @@ async function cmdRun(): Promise<void> {
                   mode: "chat",
                   sessionId: session.claudeSessionId,
                   prompt: body,
-                  startNewSession: !session.initialized,
                 });
                 replyText = result.text;
                 toolSummaries = result.toolSummaries;

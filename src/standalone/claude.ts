@@ -174,19 +174,18 @@ export async function runStandaloneClaudeSession(
 ): Promise<ClaudeOutput> {
   const history = getHistory(opts.sessionId);
 
-  // Build prompt with history context
-  const historyText = history
-    .map((m) => `[${m.role === "user" ? "User" : "Assistant"}]\n${m.content}`)
-    .join("\n\n");
-
-  let fullPrompt: string;
-  if (historyText) {
+  // Build prompt with history context (keep it compact)
+  let fullPrompt = opts.prompt;
+  if (history.length > 0) {
+    const historyText = history
+      .slice(-6) // last 3 pairs max to keep prompt short
+      .map((m) => `[${m.role === "user" ? "User" : "Assistant"}]\n${m.content}`)
+      .join("\n\n");
     fullPrompt = `Previous conversation:\n${historyText}\n\n---\n\nCurrent message:\n${opts.prompt}`;
-  } else {
-    fullPrompt = opts.prompt;
   }
 
-  const args = buildSessionArgs(cfg.argsTemplate, { ...opts, prompt: fullPrompt });
+  // Always use -p (print) mode, no session flag — we manage history ourselves
+  const args = ["-p", ...buildArgs(cfg.argsTemplate, fullPrompt)];
   const result = await execClaude(cfg, args);
 
   // Update session history
