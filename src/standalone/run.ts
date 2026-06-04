@@ -6,8 +6,9 @@ import { getConfig, getUpdates, sendMessage, sendTyping } from "../api/api.js";
 import { MessageItemType, MessageState, MessageType, TypingStatus, type MessageItem } from "../api/types.js";
 import { generateId } from "../util/random.js";
 
-import { runStandaloneClaudeSession, loadHistory, getHistory } from "./claude.js";
-import { scanDesktopSessions, extractSessionHistory } from "./import-sessions.js";
+import { ClaudeBackend } from "./claude.js";
+import { getBackend, registerBackend, type AgentBackendConfig } from "./agent.js";
+import { scanDesktopSessions } from "./import-sessions.js";
 import {
   type StandaloneRuntimeState,
   type StandaloneSessionState,
@@ -22,6 +23,34 @@ const DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const MAX_REPLY_CHARS = 1200;
 const MAX_SESSION_LIST = 8;
+
+registerBackend(new ClaudeBackend());
+
+/** Default working directory the agent runs in when a session has none. */
+const DEFAULT_WORKDIR = process.env.CLAUDE_WORKDIR?.trim() || process.cwd();
+
+/**
+ * Resolve the working directory for an agent turn. Desktop-imported sessions
+ * carry their original project path; everything else uses DEFAULT_WORKDIR.
+ * Returns undefined (inherit bridge cwd) when the resolved path is missing, so
+ * a stale path never aborts the turn.
+ */
+function resolveSessionCwd(session: StandaloneSessionState): string | undefined {
+  if (session.cwd && fs.existsSync(session.cwd)) return session.cwd;
+  if (DEFAULT_WORKDIR && fs.existsSync(DEFAULT_WORKDIR)) return DEFAULT_WORKDIR;
+  return undefined;
+}
+
+/**
+ * Extra CLI flags forwarded to the agent. Honors the legacy CLAUDE_ARGS (minus
+ * the now built-in print/prompt tokens) plus a dedicated CLAUDE_EXTRA_ARGS.
+ */
+function buildExtraArgs(): string[] {
+  const legacy = parseEnvList("CLAUDE_ARGS", [])
+    .filter((a) => a !== "-p" && a !== "--print" && a !== "{{prompt}}");
+  const extra = parseEnvList("CLAUDE_EXTRA_ARGS", []);
+  return [...legacy, ...extra];
+}
 
 function extractTextBody(itemList?: MessageItem[]): string {
   if (!itemList?.length) return "";
@@ -382,6 +411,9 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
   for (let i = 0; i < toImport.length; i++) {
     const ds = toImport[i];
     const localId = `${DESKTOP_IMPORT_PREFIX}${ds.sessionId.slice(0, 12)}`;
+    // Claude already persisted this session under its project dir; resume it
+    // natively from that cwd (when it still exists on disk).
+    const resumeCwd = ds.projectPath && fs.existsSync(ds.projectPath) ? ds.projectPath : undefined;
     const session: StandaloneSessionState = {
       id: localId,
       claudeSessionId: ds.sessionId,
@@ -394,6 +426,9 @@ function handleImportCommand(userRuntime: StandaloneUserRuntimeState, opts: { pr
       initialized: ds.userTurnCount > 0,
       lastUserText: ds.lastPrompt.length > 80 ? `${ds.lastPrompt.slice(0, 80)}…` : ds.lastPrompt,
       lastAssistantText: undefined,
+      backend: "claude",
+      agentSessionStarted: true,
+      cwd: resumeCwd,
       source: "desktop",
       desktopJsonlPath: ds.jsonlPath,
       desktopSessionId: ds.sessionId,
@@ -444,24 +479,10 @@ function handleSwitchAndLoadContext(userRuntime: StandaloneUserRuntimeState, tar
   touchSession(userRuntime, target.id);
   syncFocusedProjectFromSession(userRuntime, target);
 
-  let contextInfo = "";
-  if (target.source === "desktop" && target.desktopJsonlPath) {
-    const history = extractSessionHistory(target.desktopJsonlPath, 5, 1000);
-    console.log(`[CONTEXT] session=${target.id} claudeSessionId=${target.claudeSessionId} history=${history.length} msgs`);
-    if (history.length > 0) {
-      loadHistory(target.claudeSessionId, history);
-      const loaded = getHistory(target.claudeSessionId);
-      console.log(`[CONTEXT] loaded=${loaded.length} msgs for session=${target.claudeSessionId}`);
-      contextInfo = ` (已加载 ${history.length} 条历史消息)`;
-    } else {
-      contextInfo = " (历史消息为空，将作为新对话)";
-    }
-  }
-
   const sourceLabel = target.source === "desktop" ? "📎电脑端" : "📱微信端";
   const lines = [
     "已切换。",
-    sourceLabel + contextInfo,
+    sourceLabel,
     `项目: ${target.project || "(未设置)"}`,
     `任务: ${target.title}`,
     `已对话 ${target.turnCount} 轮`,
@@ -645,13 +666,13 @@ async function cmdRun(): Promise<void> {
   let runtime = loadStandaloneRuntimeState();
   let getUpdatesBuf = runtime.getUpdatesBuf ?? "";
 
-  const claudeCfg = {
+  const backendCfg: AgentBackendConfig = {
     command: process.env.CLAUDE_CMD?.trim() || "claude",
-    argsTemplate: parseEnvList("CLAUDE_ARGS", ["-p", "{{prompt}}"]),
     timeoutMs: parseEnvNumber("CLAUDE_TIMEOUT_MS", 120_000),
     maxOutputChars: parseEnvNumber("CLAUDE_MAX_OUTPUT_CHARS", 4000),
     envAllowlist: parseEnvList("CLAUDE_ENV_ALLOWLIST", ["ANTHROPIC_API_KEY"]),
     systemPrompt: process.env.CLAUDE_SYSTEM_PROMPT?.trim(),
+    extraArgs: buildExtraArgs(),
   };
 
   const allowFromSet = new Set(
@@ -746,13 +767,20 @@ async function cmdRun(): Promise<void> {
 
             let toolSummaries: string[] = [];
             try {
-              const result = await runStandaloneClaudeSession(claudeCfg, {
-                mode: "chat",
+              const backend = getBackend(session.backend);
+              const result = await backend.runTurn(backendCfg, {
                 sessionId: session.claudeSessionId,
                 prompt: body,
+                cwd: resolveSessionCwd(session),
+                startNewSession: !session.agentSessionStarted,
               });
               replyText = result.text;
               toolSummaries = result.toolSummaries;
+              // Persist the id the backend actually used (may change on fallback)
+              // so the next turn resumes the right session.
+              session.claudeSessionId = result.sessionId;
+              session.agentSessionStarted = true;
+              if (!session.backend) session.backend = backend.name;
             } catch (err) {
               replyText = `Claude 调用失败: ${String(err)}`;
             }

@@ -46,6 +46,27 @@ npm run test:run
 - You can override the Claude executable with `CLAUDE_CMD`
 - Multiple Weixin accounts are supported by repeated QR-code logins
 
+### Conversation context
+
+Each Weixin session maps to a native Claude Code session. The first message
+creates the session with `--session-id`; every later message resumes it with
+`--resume`, so Claude restores the full conversation from its own on-disk store.
+This means context survives bridge restarts and is not truncated to a few recent
+turns. If a resume fails (e.g. the session was never persisted, or its working
+directory is gone), the turn is transparently retried as a fresh session.
+
+Relevant environment variables:
+
+- `CLAUDE_CMD` — agent executable (default `claude`)
+- `CLAUDE_WORKDIR` — working directory the agent runs in (default: process cwd).
+  Imported desktop sessions override this with their original project path.
+- `CLAUDE_EXTRA_ARGS` — extra CLI flags passed verbatim (e.g. `--model sonnet`,
+  `--permission-mode acceptEdits`). The legacy `CLAUDE_ARGS` is still honored for
+  flags other than the now built-in `-p` / `{{prompt}}`.
+- `CLAUDE_SYSTEM_PROMPT`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_OUTPUT_CHARS`,
+  `CLAUDE_ENV_ALLOWLIST` — system prompt, per-turn timeout, output cap, and the
+  env vars forwarded to the agent process.
+
 ## Backend API Protocol
 
 This bridge communicates with the backend gateway via HTTP JSON API. Developers integrating with their own backend need to implement the following interfaces.

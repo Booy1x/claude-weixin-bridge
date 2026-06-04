@@ -4,6 +4,18 @@
 
 This project follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
+## [Unreleased]
+
+### Added
+
+- **Agent backend abstraction (`AgentBackend`):** Pluggable interface (`createSession`/`runTurn`/`resume` semantics via `newSessionId` + `runTurn`) so the bridge can drive different coding-agent CLIs. Claude Code is the first implementation (`ClaudeBackend`); future backends (e.g. OpenCode) only need to register an adapter.
+- **Native Claude session resume:** Each Weixin session now maps to a native Claude session — first turn creates it with `--session-id`, later turns resume with `--resume`. Context survives bridge restarts and is no longer truncated to the last few turns. `CLAUDE_WORKDIR` and `CLAUDE_EXTRA_ARGS` env vars added.
+
+### Changed
+
+- Session state gains `backend`, `agentSessionStarted`, and `cwd` fields. The in-memory conversation-history map and manual prompt stuffing are removed in favor of native resume.
+- A failed resume (`No conversation found`) now transparently falls back to starting a fresh session instead of surfacing the error.
+
 ## [2.1.7] - 2026-04-07
 
 ### Fixed
