@@ -9,6 +9,8 @@ import { generateId } from "../util/random.js";
 import { ClaudeBackend } from "./claude.js";
 import { getBackend, registerBackend, type AgentBackendConfig } from "./agent.js";
 import { scanDesktopSessions } from "./import-sessions.js";
+import { resolveAllowlist, isSenderAllowed, isValidPermissionMode } from "./security.js";
+import { KeyedTaskQueue } from "./task-queue.js";
 import {
   type StandaloneRuntimeState,
   type StandaloneSessionState,
@@ -49,7 +51,17 @@ function buildExtraArgs(): string[] {
   const legacy = parseEnvList("CLAUDE_ARGS", [])
     .filter((a) => a !== "-p" && a !== "--print" && a !== "{{prompt}}");
   const extra = parseEnvList("CLAUDE_EXTRA_ARGS", []);
-  return [...legacy, ...extra];
+  const args = [...legacy, ...extra];
+
+  const mode = process.env.CLAUDE_PERMISSION_MODE?.trim();
+  if (mode && !args.includes("--permission-mode")) {
+    if (isValidPermissionMode(mode)) {
+      args.push("--permission-mode", mode);
+    } else {
+      console.warn(`[SECURITY] 忽略未知 CLAUDE_PERMISSION_MODE="${mode}"`);
+    }
+  }
+  return args;
 }
 
 function extractTextBody(itemList?: MessageItem[]): string {
@@ -657,13 +669,72 @@ async function cmdLogin(): Promise<void> {
   console.log(`登录成功，accountId=${wait.accountId}`);
 }
 
+/**
+ * Run one agent turn for the user's focused session: resolve/advance the
+ * session, drive the backend, fold in tool summaries, and mirror to the desktop
+ * jsonl when applicable. Returns the reply text; backend failures are caught and
+ * surfaced as the reply rather than thrown.
+ */
+async function runAgentTurn(
+  userRuntime: StandaloneUserRuntimeState,
+  body: string,
+  cfg: AgentBackendConfig,
+): Promise<string> {
+  const session = ensureFocusedSession(userRuntime);
+  touchSession(userRuntime, session.id);
+  syncFocusedProjectFromSession(userRuntime, session);
+
+  let replyText = "";
+  let toolSummaries: string[] = [];
+  try {
+    const backend = getBackend(session.backend);
+    const result = await backend.runTurn(cfg, {
+      sessionId: session.claudeSessionId,
+      prompt: body,
+      cwd: resolveSessionCwd(session),
+      startNewSession: !session.agentSessionStarted,
+    });
+    replyText = result.text;
+    toolSummaries = result.toolSummaries;
+    // Persist the id the backend actually used (may change on fallback) so the
+    // next turn resumes the right session.
+    session.claudeSessionId = result.sessionId;
+    session.agentSessionStarted = true;
+    if (!session.backend) session.backend = backend.name;
+  } catch (err) {
+    replyText = `Claude 调用失败: ${String(err)}`;
+  }
+  updateSessionFromTurn(session, body, replyText);
+
+  if (toolSummaries.length > 0) {
+    const summary = toolSummaries.map((s) => `✅ ${s}`).join("\n");
+    replyText = `${replyText}\n\n---\n${summary}`;
+  }
+
+  if (session.source === "desktop" && session.desktopJsonlPath) {
+    try {
+      const timestamp = new Date().toISOString();
+      const userEntry = JSON.stringify({ type: "user", message: { role: "user", content: body }, timestamp });
+      const cleanReply = replyText.replace(/\n\n---\n(✅ .+\n?)+$/, "");
+      const asstEntry = JSON.stringify({ type: "assistant", message: { role: "assistant", content: cleanReply }, timestamp });
+      fs.appendFileSync(session.desktopJsonlPath, `\n${userEntry}\n${asstEntry}`, "utf-8");
+    } catch (syncErr) {
+      console.error(`[SYNC] failed to write jsonl: ${String(syncErr)}`);
+    }
+  }
+  return replyText;
+}
+
 async function cmdRun(): Promise<void> {
   const account = loadStandaloneAccountState();
   if (!account?.token) {
     throw new Error("未找到登录信息，请先运行: npm run standalone:login");
   }
 
-  let runtime = loadStandaloneRuntimeState();
+  // Single in-memory runtime is the source of truth; async turns mutate it and
+  // saves are synchronous (writeFileSync), so concurrent jobs for different
+  // senders never interleave a read-modify-write.
+  const runtime = loadStandaloneRuntimeState();
   let getUpdatesBuf = runtime.getUpdatesBuf ?? "";
 
   const backendCfg: AgentBackendConfig = {
@@ -675,9 +746,108 @@ async function cmdRun(): Promise<void> {
     extraArgs: buildExtraArgs(),
   };
 
-  const allowFromSet = new Set(
-    parseEnvList("WEIXIN_ALLOW_FROM", []).map((v) => v.trim()).filter(Boolean),
-  );
+  const allowlist = resolveAllowlist(parseEnvList("WEIXIN_ALLOW_FROM", []), account.userId);
+  if (allowlist.allowAll) {
+    if (allowlist.openReason === "explicit") {
+      console.warn("[SECURITY] WEIXIN_ALLOW_FROM=* —— 已显式放行所有发信人");
+    } else {
+      console.warn(
+        "[SECURITY] 未配置 WEIXIN_ALLOW_FROM 且登录用户未知，将放行所有发信人；" +
+          "任何人都能在本机触发 claude，建议设置 WEIXIN_ALLOW_FROM。",
+      );
+    }
+  } else {
+    console.log(`[SECURITY] 白名单生效，允许 ${allowlist.allowed.size} 个发信人`);
+  }
+  if (allowlist.allowAll && backendCfg.extraArgs?.includes("bypassPermissions")) {
+    console.warn("[SECURITY] 危险组合：放行所有发信人 + --permission-mode bypassPermissions");
+  }
+
+  // One serial lane per sender: a sender's long turn never overlaps their next
+  // message, but different senders (and the polling loop) run concurrently.
+  const userQueue = new KeyedTaskQueue();
+
+  const setTypingStatus = async (from: string, ticket: string, status: number): Promise<void> => {
+    if (!ticket) return;
+    try {
+      await sendTyping({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        body: { ilink_user_id: from, typing_ticket: ticket, status },
+      });
+    } catch {
+      // typing is best-effort
+    }
+  };
+
+  const processIncoming = async (from: string, body: string, contextToken?: string): Promise<void> => {
+    let typingTicket = "";
+    try {
+      const cfg = await getConfig({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        ilinkUserId: from,
+        contextToken,
+      });
+      typingTicket = cfg.typing_ticket ?? "";
+    } catch {
+      // ignore
+    }
+
+    await setTypingStatus(from, typingTicket, TypingStatus.TYPING);
+    // Keep the "typing…" indicator alive for the duration of a long turn.
+    const keepAlive = typingTicket
+      ? setInterval(() => {
+          void setTypingStatus(from, typingTicket, TypingStatus.TYPING);
+        }, 25_000)
+      : undefined;
+
+    let replyText = "";
+    try {
+      const userRuntime = getOrCreateUserRuntime(runtime, from);
+      const command = parseCommand(body);
+      if (command?.type === "list") {
+        replyText = buildSessionsListCard(userRuntime);
+      } else if (command?.type === "switch") {
+        const target = resolveSessionByTarget(userRuntime, command.target);
+        replyText = target ? handleSwitchAndLoadContext(userRuntime, target) : "未找到: " + command.target;
+      } else if (command?.type === "new") {
+        const created = createSession(userRuntime, { project: command.project, title: command.title });
+        replyText = trimReplyText([
+          "已创建并切到当前任务。",
+          `项目: ${created.project || "(未设置)"}`,
+          `任务: ${created.title}`,
+          `编号: ${created.id}`,
+        ].join("\n"));
+      } else if (command?.type === "import") {
+        replyText = handleImportCommand(userRuntime, { project: command.project, limit: command.limit });
+      } else if (command?.type === "clear") {
+        replyText = handleClearCommand(userRuntime);
+      } else {
+        replyText = await runAgentTurn(userRuntime, body, backendCfg);
+      }
+      saveStandaloneRuntimeState(runtime);
+    } finally {
+      if (keepAlive) clearInterval(keepAlive);
+      await setTypingStatus(from, typingTicket, TypingStatus.CANCEL);
+    }
+
+    await sendMessage({
+      baseUrl: account.baseUrl,
+      token: account.token,
+      body: {
+        msg: {
+          from_user_id: "",
+          to_user_id: from,
+          client_id: generateId("claude-weixin"),
+          message_type: MessageType.BOT,
+          message_state: MessageState.FINISH,
+          context_token: contextToken,
+          item_list: [{ type: MessageItemType.TEXT, text_item: { text: replyText } }],
+        },
+      },
+    });
+  };
 
   console.log(`开始轮询微信消息，accountId=${account.accountId}`);
 
@@ -691,7 +861,7 @@ async function cmdRun(): Promise<void> {
 
       if (updates.get_updates_buf && updates.get_updates_buf !== getUpdatesBuf) {
         getUpdatesBuf = updates.get_updates_buf;
-        runtime = { ...runtime, getUpdatesBuf };
+        runtime.getUpdatesBuf = getUpdatesBuf;
         saveStandaloneRuntimeState(runtime);
       }
 
@@ -699,144 +869,22 @@ async function cmdRun(): Promise<void> {
       for (const msg of msgs) {
         const from = msg.from_user_id ?? "";
         if (!from) continue;
-        if (allowFromSet.size > 0 && !allowFromSet.has(from)) continue;
+        if (!isSenderAllowed(allowlist, from)) {
+          console.warn(`[SECURITY] 拒绝未授权发信人的消息: ${from}`);
+          continue;
+        }
 
         const body = extractTextBody(msg.item_list).trim();
         if (!body) continue;
 
-        try {
-          const contextToken = msg.context_token;
-          let typingTicket = "";
-          try {
-            const cfg = await getConfig({
-              baseUrl: account.baseUrl,
-              token: account.token,
-              ilinkUserId: from,
-              contextToken,
-            });
-            typingTicket = cfg.typing_ticket ?? "";
-          } catch {
-            // ignore
-          }
-
-          if (typingTicket) {
-            await sendTyping({
-              baseUrl: account.baseUrl,
-              token: account.token,
-              body: {
-                ilink_user_id: from,
-                typing_ticket: typingTicket,
-                status: TypingStatus.TYPING,
-              },
-            });
-          }
-
-          runtime = loadStandaloneRuntimeState();
-          const userRuntime = getOrCreateUserRuntime(runtime, from);
-          let replyText = "";
-
-          const command = parseCommand(body);
-          if (command?.type === "list") {
-            replyText = buildSessionsListCard(userRuntime);
-          } else if (command?.type === "switch") {
-            const target = resolveSessionByTarget(userRuntime, command.target);
-            if (!target) {
-              replyText = "未找到: " + command.target;
-            } else {
-              replyText = handleSwitchAndLoadContext(userRuntime, target);
-            }
-          } else if (command?.type === "new") {
-            const created = createSession(userRuntime, {
-              project: command.project,
-              title: command.title,
-            });
-            replyText = trimReplyText([
-              "已创建并切到当前任务。",
-              `项目: ${created.project || "(未设置)"}`,
-              `任务: ${created.title}`,
-              `编号: ${created.id}`,
-            ].join("\n"));
-          } else if (command?.type === "import") {
-            replyText = handleImportCommand(userRuntime, { project: command.project, limit: command.limit });
-          } else if (command?.type === "clear") {
-            replyText = handleClearCommand(userRuntime);
-          } else {
-            const session = ensureFocusedSession(userRuntime);
-            touchSession(userRuntime, session.id);
-            syncFocusedProjectFromSession(userRuntime, session);
-
-            let toolSummaries: string[] = [];
-            try {
-              const backend = getBackend(session.backend);
-              const result = await backend.runTurn(backendCfg, {
-                sessionId: session.claudeSessionId,
-                prompt: body,
-                cwd: resolveSessionCwd(session),
-                startNewSession: !session.agentSessionStarted,
-              });
-              replyText = result.text;
-              toolSummaries = result.toolSummaries;
-              // Persist the id the backend actually used (may change on fallback)
-              // so the next turn resumes the right session.
-              session.claudeSessionId = result.sessionId;
-              session.agentSessionStarted = true;
-              if (!session.backend) session.backend = backend.name;
-            } catch (err) {
-              replyText = `Claude 调用失败: ${String(err)}`;
-            }
-            updateSessionFromTurn(session, body, replyText);
-
-            if (toolSummaries.length > 0) {
-              const summary = toolSummaries.map(s => `✅ ${s}`).join("\n");
-              replyText = `${replyText}\n\n---\n${summary}`;
-            }
-
-            // Sync to desktop jsonl
-            if (session.source === "desktop" && session.desktopJsonlPath) {
-              try {
-                const timestamp = new Date().toISOString();
-                const userEntry = JSON.stringify({ type: "user", message: { role: "user", content: body }, timestamp });
-                const cleanReply = replyText.replace(/\n\n---\n(✅ .+\n?)+$/, "");
-                const asstEntry = JSON.stringify({ type: "assistant", message: { role: "assistant", content: cleanReply }, timestamp });
-                fs.appendFileSync(session.desktopJsonlPath, `\n${userEntry}\n${asstEntry}`, "utf-8");
-              } catch (syncErr) {
-                console.error(`[SYNC] failed to write jsonl: ${String(syncErr)}`);
-              }
-            }
-          }
-
-          saveStandaloneRuntimeState(runtime);
-
-          if (typingTicket) {
-            await sendTyping({
-              baseUrl: account.baseUrl,
-              token: account.token,
-              body: {
-                ilink_user_id: from,
-                typing_ticket: typingTicket,
-                status: TypingStatus.CANCEL,
-              },
-            });
-          }
-
-          await sendMessage({
-            baseUrl: account.baseUrl,
-            token: account.token,
-            body: {
-              msg: {
-                from_user_id: "",
-                to_user_id: from,
-                client_id: generateId("claude-weixin"),
-                message_type: MessageType.BOT,
-                message_state: MessageState.FINISH,
-                context_token: contextToken,
-                item_list: [{ type: MessageItemType.TEXT, text_item: { text: replyText } }],
-              },
-            },
+        const contextToken = msg.context_token;
+        // Dispatch without awaiting so the polling loop keeps pulling messages
+        // while turns run in the background.
+        void userQueue
+          .enqueue(from, () => processIncoming(from, body, contextToken))
+          .catch((msgErr) => {
+            console.error(`处理单条消息失败: ${String(msgErr)}`);
           });
-        } catch (msgErr) {
-          console.error(`处理单条消息失败: ${String(msgErr)}`);
-        }
       }
     } catch (loopErr) {
       console.error(`轮询异常，2秒后重试: ${String(loopErr)}`);
