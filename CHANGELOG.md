@@ -10,11 +10,15 @@ This project follows the [Keep a Changelog](https://keepachangelog.com/) format.
 
 - **Agent backend abstraction (`AgentBackend`):** Pluggable interface (`createSession`/`runTurn`/`resume` semantics via `newSessionId` + `runTurn`) so the bridge can drive different coding-agent CLIs. Claude Code is the first implementation (`ClaudeBackend`); future backends (e.g. OpenCode) only need to register an adapter.
 - **Native Claude session resume:** Each Weixin session now maps to a native Claude session — first turn creates it with `--session-id`, later turns resume with `--resume`. Context survives bridge restarts and is no longer truncated to the last few turns. `CLAUDE_WORKDIR` and `CLAUDE_EXTRA_ARGS` env vars added.
+- **Owner-locked access by default:** The logged-in owner (QR scanner) is always allowlisted, so a fresh install is restricted to that user instead of allowing everyone. `WEIXIN_ALLOW_FROM` adds more senders; `WEIXIN_ALLOW_FROM=*` opts back into allow-all (with a startup warning).
+- **Permission mode:** `CLAUDE_PERMISSION_MODE` is forwarded as `--permission-mode` (validated against known modes). The bridge warns on the dangerous combination of allow-all + `bypassPermissions`.
+- **Concurrent, non-blocking message handling:** Turns are dispatched off the polling loop via a per-sender serial queue — a long task no longer blocks the long-poll or other senders, while same-sender messages stay ordered and a session is never resumed twice at once. The typing indicator is refreshed during long turns.
 
 ### Changed
 
 - Session state gains `backend`, `agentSessionStarted`, and `cwd` fields. The in-memory conversation-history map and manual prompt stuffing are removed in favor of native resume.
 - A failed resume (`No conversation found`) now transparently falls back to starting a fresh session instead of surfacing the error.
+- Unauthorized senders are now rejected (and logged) instead of silently dropped; runtime state is held in memory and saved synchronously rather than reloaded from disk per message.
 
 ## [2.1.7] - 2026-04-07
 

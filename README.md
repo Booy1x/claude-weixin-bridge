@@ -66,6 +66,33 @@ Relevant environment variables:
 - `CLAUDE_SYSTEM_PROMPT`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_OUTPUT_CHARS`,
   `CLAUDE_ENV_ALLOWLIST` — system prompt, per-turn timeout, output cap, and the
   env vars forwarded to the agent process.
+- `CLAUDE_PERMISSION_MODE` — passed through as `--permission-mode` when set to a
+  valid mode (`default`, `plan`, `acceptEdits`, `bypassPermissions`, …). Unknown
+  values are ignored with a warning. Leave unset to use Claude's own default.
+
+### Access control
+
+The bridge runs the agent (and reads/writes files, runs commands) on the host,
+so an unauthenticated sender is effectively remote code execution. Access is
+controlled by `WEIXIN_ALLOW_FROM` (comma-separated sender ids):
+
+- The **logged-in owner** (the account that scanned the QR code) is always
+  allowed, so a fresh install is locked to you by default.
+- Add more ids via `WEIXIN_ALLOW_FROM` to allow additional senders.
+- Set `WEIXIN_ALLOW_FROM=*` to explicitly allow everyone (logged on startup).
+- Only when the owner id is unknown **and** `WEIXIN_ALLOW_FROM` is empty does the
+  bridge fall back to allow-all — it logs a loud warning in that case.
+
+Combining allow-all with `--permission-mode bypassPermissions` turns the bot
+into an open shell on your machine; the bridge warns when it detects this.
+
+### Concurrency
+
+Messages are dispatched off the polling loop: each sender has its own serial
+lane (their messages are handled in order, and a session is never resumed twice
+at once), while different senders — and the long-poll itself — run concurrently.
+A long task from one user therefore no longer blocks polling or other users, and
+the "typing…" indicator is refreshed for the duration of a turn.
 
 ## Backend API Protocol
 
