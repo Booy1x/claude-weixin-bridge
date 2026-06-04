@@ -25,6 +25,12 @@ export type StandaloneSessionState = {
   initialized: boolean;
   lastUserText?: string;
   lastAssistantText?: string;
+  /** Agent backend that owns `claudeSessionId`, e.g. "claude". Defaults to "claude". */
+  backend?: string;
+  /** True once the backend has successfully created/persisted this session. */
+  agentSessionStarted?: boolean;
+  /** Working directory the agent runs in (project root); needed for native resume. */
+  cwd?: string;
   /** "local" = created in Weixin, "desktop" = imported from ~/.claude/projects */
   source?: "local" | "desktop";
   /** Absolute path to the desktop session jsonl file (only for source=desktop) */
@@ -84,6 +90,9 @@ function normalizeSession(sessionId: string, raw: unknown): StandaloneSessionSta
   const initialized = typeof raw.initialized === "boolean" ? raw.initialized : turnCount > 0;
   const lastUserText = typeof raw.lastUserText === "string" ? raw.lastUserText : undefined;
   const lastAssistantText = typeof raw.lastAssistantText === "string" ? raw.lastAssistantText : undefined;
+  const backend = typeof raw.backend === "string" && raw.backend.trim() ? raw.backend.trim() : undefined;
+  const agentSessionStarted = typeof raw.agentSessionStarted === "boolean" ? raw.agentSessionStarted : undefined;
+  const cwd = typeof raw.cwd === "string" && raw.cwd.trim() ? raw.cwd : undefined;
   const source: "local" | "desktop" | undefined = raw.source === "desktop" ? "desktop" : (raw.source === "local" ? "local" : undefined);
   const desktopJsonlPath = typeof raw.desktopJsonlPath === "string" ? raw.desktopJsonlPath : undefined;
   const desktopSessionId = typeof raw.desktopSessionId === "string" ? raw.desktopSessionId : undefined;
@@ -100,6 +109,9 @@ function normalizeSession(sessionId: string, raw: unknown): StandaloneSessionSta
     initialized,
     lastUserText,
     lastAssistantText,
+    backend,
+    agentSessionStarted,
+    cwd,
     source,
     desktopJsonlPath,
     desktopSessionId,

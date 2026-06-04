@@ -1,51 +1,98 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 
-export type StandaloneClaudeInput = {
-  from: string;
-  body: string;
-};
+import type {
+  AgentBackend,
+  AgentBackendConfig,
+  AgentTurnInput,
+  AgentTurnResult,
+} from "./agent.js";
 
-export type StandaloneClaudeMode = "chat" | "sync";
+interface ClaudeOutput {
+  text: string;
+  toolSummaries: string[];
+  /** Session id reported by the CLI (`session_id` in JSON output), if any. */
+  sessionId?: string;
+}
 
-export type StandaloneClaudeSessionOptions = {
-  mode: StandaloneClaudeMode;
+/**
+ * Parse the stdout of `claude --print --output-format json`.
+ *
+ * The single-result envelope looks like:
+ *   { "type": "result", "result": "<text>", "session_id": "<uuid>", ... }
+ *
+ * Older / streaming shapes may instead carry `text` plus a `content` array of
+ * blocks (including `tool_use`); both are handled best-effort. Plain text
+ * output (no `--output-format json`) falls through to the text branch.
+ */
+export function parseClaudeOutput(output: string): ClaudeOutput {
+  const trimmed = output.trim();
+  if (!trimmed) return { text: "", toolSummaries: [] };
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      text?: string;
+      result?: string;
+      session_id?: string;
+      content?: Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }>;
+    };
+    const text = parsed.result ?? parsed.text ?? "";
+    const sessionId = typeof parsed.session_id === "string" && parsed.session_id ? parsed.session_id : undefined;
+    const toolSummaries: string[] = [];
+
+    if (Array.isArray(parsed.content)) {
+      for (const block of parsed.content) {
+        if (block.type === "tool_use" && block.name) {
+          const input = block.input || {};
+          let detail = "";
+          if (
+            (block.name === "Write" || block.name === "Edit" || block.name === "Read") &&
+            typeof input.file_path === "string"
+          ) {
+            detail = input.file_path;
+          }
+          toolSummaries.push(detail ? `${block.name} ${detail}` : block.name);
+        }
+      }
+    }
+
+    return { text, toolSummaries, sessionId };
+  } catch {
+    return { text: trimmed, toolSummaries: [] };
+  }
+}
+
+/**
+ * Build the argv for one Claude turn.
+ *
+ * First turn of a session uses `--session-id <uuid>` to create it with a known
+ * id; subsequent turns use `--resume <uuid>` so Claude restores the full
+ * conversation from its own on-disk store (durable across bridge restarts).
+ */
+export function buildClaudeTurnArgs(opts: {
   sessionId: string;
   prompt: string;
-  startNewSession?: boolean;
-};
-
-export type StandaloneClaudeConfig = {
-  command: string;
-  argsTemplate: string[];
-  timeoutMs: number;
-  maxOutputChars: number;
-  envAllowlist: string[];
+  startNewSession: boolean;
   systemPrompt?: string;
-};
-
-function buildPrompt(input: StandaloneClaudeInput, systemPrompt?: string): string {
-  const userPrompt = `From: ${input.from}\n\nUser message:\n${input.body || "(empty)"}`;
-  if (!systemPrompt?.trim()) return userPrompt;
-  return `${systemPrompt.trim()}\n\n${userPrompt}`;
+  extraArgs?: string[];
+}): string[] {
+  const args: string[] = ["--print", "--output-format", "json"];
+  args.push(opts.startNewSession ? "--session-id" : "--resume", opts.sessionId);
+  if (opts.systemPrompt?.trim()) {
+    args.push("--system-prompt", opts.systemPrompt.trim());
+  }
+  if (opts.extraArgs?.length) {
+    args.push(...opts.extraArgs);
+  }
+  args.push(opts.prompt);
+  return args;
 }
 
-function buildArgs(argsTemplate: string[], prompt: string): string[] {
-  return argsTemplate.map((item) => item.replaceAll("{{prompt}}", prompt));
-}
-
-export function buildSessionArgs(argsTemplate: string[], opts: StandaloneClaudeSessionOptions): string[] {
-  if (opts.mode === "sync") {
-    return ["-p", "-r", opts.sessionId, "--fork-session", opts.prompt];
-  }
-
-  const hasPrintFlag = argsTemplate.includes("-p") || argsTemplate.includes("--print");
-  const sessionFlag = opts.startNewSession ? "--session-id" : "-r";
-
-  if (hasPrintFlag) {
-    return [sessionFlag, opts.sessionId, ...buildArgs(argsTemplate, opts.prompt)];
-  }
-
-  return ["-p", sessionFlag, opts.sessionId, opts.prompt];
+/** Detect the "resume target does not exist" failure so we can fall back. */
+export function isSessionNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/no conversation found/i.test(msg)) return true;
+  if (/no session found/i.test(msg)) return true;
+  return /session/i.test(msg) && /not found/i.test(msg);
 }
 
 function pickEnv(allowlist: string[]): NodeJS.ProcessEnv {
@@ -60,48 +107,11 @@ function pickEnv(allowlist: string[]): NodeJS.ProcessEnv {
   return env;
 }
 
-interface ClaudeOutput {
-  text: string;
-  toolSummaries: string[];
-}
-
-function parseClaudeOutput(output: string): ClaudeOutput {
-  const trimmed = output.trim();
-  if (!trimmed) return { text: "", toolSummaries: [] };
-  try {
-    const parsed = JSON.parse(trimmed) as {
-      text?: string;
-      content?: Array<{ type: string; name?: string; input?: Record<string, unknown>; text?: string }>;
-    };
-    const text = parsed.text || "";
-    const toolSummaries: string[] = [];
-
-    // Extract tool_use blocks from content array
-    if (Array.isArray(parsed.content)) {
-      for (const block of parsed.content) {
-        if (block.type === "tool_use" && block.name) {
-          const input = block.input || {};
-          let detail = "";
-          if (block.name === "Write" && input.file_path) {
-            detail = String(input.file_path);
-          } else if (block.name === "Edit" && input.file_path) {
-            detail = String(input.file_path);
-          } else if (block.name === "Read" && input.file_path) {
-            detail = String(input.file_path);
-          }
-          toolSummaries.push(detail ? `${block.name} ${detail}` : block.name);
-        }
-      }
-    }
-
-    return { text, toolSummaries };
-  } catch {
-    // plain text output path
-    return { text: trimmed, toolSummaries: [] };
-  }
-}
-
-async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<ClaudeOutput> {
+async function execClaude(
+  cfg: AgentBackendConfig,
+  args: string[],
+  cwd?: string,
+): Promise<ClaudeOutput> {
   const env = pickEnv(cfg.envAllowlist);
 
   const stdout = await new Promise<string>((resolve, reject) => {
@@ -112,6 +122,7 @@ async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<
         timeout: cfg.timeoutMs,
         maxBuffer: Math.max(cfg.maxOutputChars * 4, 64 * 1024),
         env,
+        ...(cwd ? { cwd } : {}),
       },
       (err, out, stderr) => {
         if (err) {
@@ -130,67 +141,53 @@ async function execClaude(cfg: StandaloneClaudeConfig, args: string[]): Promise<
   return result;
 }
 
-export async function runStandaloneClaude(
-  input: StandaloneClaudeInput,
-  cfg: StandaloneClaudeConfig,
-): Promise<ClaudeOutput> {
-  const prompt = buildPrompt(input, cfg.systemPrompt);
-  const args = buildArgs(cfg.argsTemplate, prompt);
-  return execClaude(cfg, args);
-}
+/**
+ * Claude Code backend: drives the `claude` CLI with native session resume.
+ *
+ * Context lives in Claude's own session store, not in bridge memory, so it
+ * survives restarts and is not truncated to a few recent turns. If a resume
+ * fails (e.g. the session was never persisted, or lives under a different
+ * working directory), the turn is transparently retried as a fresh session.
+ */
+export class ClaudeBackend implements AgentBackend {
+  readonly name = "claude";
 
-// ---------------------------------------------------------------------------
-// Session history management (in-memory, per session ID)
-// ---------------------------------------------------------------------------
-
-type Message = { role: "user" | "assistant"; content: string };
-
-const sessionHistories = new Map<string, Message[]>();
-
-export function getHistory(sessionId: string): Message[] {
-  let history = sessionHistories.get(sessionId);
-  if (!history) {
-    history = [];
-    sessionHistories.set(sessionId, history);
-  }
-  return history;
-}
-
-export function loadHistory(sessionId: string, messages: Message[]): void {
-  sessionHistories.set(sessionId, [...messages]);
-}
-
-export function clearClaudeSession(sessionId: string): void {
-  sessionHistories.delete(sessionId);
-}
-
-// ---------------------------------------------------------------------------
-// Run with session history (for desktop-imported sessions)
-// ---------------------------------------------------------------------------
-
-export async function runStandaloneClaudeSession(
-  cfg: StandaloneClaudeConfig,
-  opts: StandaloneClaudeSessionOptions,
-): Promise<ClaudeOutput> {
-  const history = getHistory(opts.sessionId);
-
-  // Build prompt with history context (keep it compact)
-  let fullPrompt = opts.prompt;
-  if (history.length > 0) {
-    const historyText = history
-      .slice(-6) // last 3 pairs max to keep prompt short
-      .map((m) => `[${m.role === "user" ? "User" : "Assistant"}]\n${m.content}`)
-      .join("\n\n");
-    fullPrompt = `Previous conversation:\n${historyText}\n\n---\n\nCurrent message:\n${opts.prompt}`;
+  newSessionId(): string {
+    return crypto.randomUUID();
   }
 
-  // Always use -p (print) mode, no session flag — we manage history ourselves
-  const args = ["-p", ...buildArgs(cfg.argsTemplate, fullPrompt)];
-  const result = await execClaude(cfg, args);
+  async runTurn(cfg: AgentBackendConfig, input: AgentTurnInput): Promise<AgentTurnResult> {
+    const attempt = async (sessionId: string, startNewSession: boolean): Promise<ClaudeOutput> => {
+      const args = buildClaudeTurnArgs({
+        sessionId,
+        prompt: input.prompt,
+        startNewSession,
+        systemPrompt: cfg.systemPrompt,
+        extraArgs: cfg.extraArgs,
+      });
+      return execClaude(cfg, args, input.cwd);
+    };
 
-  // Update session history
-  history.push({ role: "user", content: opts.prompt });
-  history.push({ role: "assistant", content: result.text });
-
-  return result;
+    try {
+      const out = await attempt(input.sessionId, input.startNewSession);
+      return {
+        text: out.text,
+        toolSummaries: out.toolSummaries,
+        sessionId: out.sessionId || input.sessionId,
+        startedNewSession: input.startNewSession,
+      };
+    } catch (err) {
+      if (!input.startNewSession && isSessionNotFoundError(err)) {
+        const fresh = this.newSessionId();
+        const out = await attempt(fresh, true);
+        return {
+          text: out.text,
+          toolSummaries: out.toolSummaries,
+          sessionId: out.sessionId || fresh,
+          startedNewSession: true,
+        };
+      }
+      throw err;
+    }
+  }
 }
